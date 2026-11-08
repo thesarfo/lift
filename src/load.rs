@@ -42,6 +42,7 @@ pub struct Report {
     pub missing: bool,
     /// rows that loaded, but a deferred reference pointed at nothing and was left NULL
     pub nulled_refs: Vec<Reject>,
+    pub elapsed: std::time::Duration,
 }
 
 #[derive(Debug, Default)]
@@ -114,11 +115,15 @@ pub fn run(db: &mut Client, m: &Mapping, opts: &Options) -> Result<Vec<Report>> 
     let mut reports: Vec<(String, Report)> = Vec::new();
     for (i, name) in order.iter().enumerate() {
         let unit = &units[name];
-        let r = load_table(&mut tx, &m.schema, unit, i, &ids, opts).with_context(|| format!("loading {name}"))?;
+        let t0 = std::time::Instant::now();
+        let mut r = load_table(&mut tx, &m.schema, unit, i, &ids, opts).with_context(|| format!("loading {name}"))?;
+        r.elapsed = t0.elapsed();
         reports.push((unit.collection.to_string(), r));
         for child in &unit.children {
-            let r = load_children(&mut tx, &m.schema, unit, child, &ids, opts)
+            let t0 = std::time::Instant::now();
+            let mut r = load_children(&mut tx, &m.schema, unit, child, &ids, opts)
                 .with_context(|| format!("loading {} from {}.{}", child.plan.table_name, unit.collection, child.array))?;
+            r.elapsed = t0.elapsed();
             reports.push((unit.collection.to_string(), r));
         }
     }
@@ -375,13 +380,62 @@ fn load_table(tx: &mut Transaction, schema: &str, u: &Unit, i: usize, ids: &Suff
         .filter(|c| *c != pk)
         .map(|c| format!("{c} = excluded.{c}"))
         .collect();
-    let on_conflict =
-        if updates.is_empty() { "do nothing".to_string() } else { format!("do update set {}", updates.join(", ")) };
-    report.loaded = tx.execute(
-        &format!("insert into {} ({cols}) select {cols} from lift_tmp on conflict ({pk}) {on_conflict}", target(schema, p)),
-        &[],
+    // rows that are already identical are left alone, so a re-run writes only what changed
+    let t = target(schema, p);
+    let on_conflict = if updates.is_empty() {
+        "do nothing".to_string()
+    } else {
+        let set_cols: Vec<String> = p
+            .columns
+            .iter()
+            .filter(|(c, _)| !p.deferred.contains(&c.name))
+            .map(|(c, _)| ident(&c.name))
+            .filter(|c| *c != pk)
+            .collect();
+        let old = set_cols.iter().map(|c| format!("{t}.{c}")).collect::<Vec<_>>().join(", ");
+        let new = set_cols.iter().map(|c| format!("excluded.{c}")).collect::<Vec<_>>().join(", ");
+        format!("do update set {} where row({old}) is distinct from row({new})", updates.join(", "))
+    };
+    report.loaded = insert_without_fks(
+        tx,
+        &t,
+        &format!("insert into {t} ({cols}) select {cols} from lift_tmp on conflict ({pk}) {on_conflict}"),
     )?;
     Ok(report)
+}
+
+/// Postgres checks foreign keys row by row on insert, which is most of a bulk load's time. lift
+/// has already dropped every row whose references point at nothing, so for the insert it drops
+/// the table's foreign keys and adds them back afterwards, which re-validates them in one pass.
+/// Without permission to alter the table it just inserts with the per-row checks.
+fn insert_without_fks(tx: &mut Transaction, target: &str, insert: &str) -> Result<u64> {
+    let fks: Vec<(String, String)> = tx
+        .query(
+            "select conname::text, pg_get_constraintdef(oid) from pg_constraint
+             where conrelid = $1::text::regclass and contype = 'f'",
+            &[&target],
+        )?
+        .iter()
+        .map(|r| (r.get(0), r.get(1)))
+        .collect();
+    let dropped = !fks.is_empty() && {
+        let mut sp = tx.transaction()?;
+        let ok = fks.iter().all(|(name, _)| sp.batch_execute(&format!("alter table {target} drop constraint {}", ident(name))).is_ok());
+        if ok { sp.commit()? } else { sp.rollback()? }
+        ok
+    };
+    let t0 = std::time::Instant::now();
+    let n = tx.execute(insert, &[])?;
+    trace(target, "insert", t0);
+    if dropped {
+        let t0 = std::time::Instant::now();
+        for (name, def) in &fks {
+            tx.batch_execute(&format!("alter table {target} add constraint {} {def}", ident(name)))
+                .with_context(|| format!("re-adding foreign key {name} on {target}"))?;
+        }
+        trace(target, "re-check foreign keys", t0);
+    }
+    Ok(n)
 }
 
 /// Convert every document into `lift_tmp` (typed like the target) and drop rows whose references
@@ -393,7 +447,8 @@ pub(crate) fn stage_table(tx: &mut Transaction, schema: &str, u: &Unit, ids: &Su
         report.missing = true;
         return Ok(report);
     };
-    let mut copy = start_copy(tx, schema, p)?;
+    let t0 = std::time::Instant::now();
+    let mut copy = std::io::BufWriter::with_capacity(1 << 20, start_copy(tx, schema, p)?);
     for doc in docs {
         let node = Bson::Document(doc?);
         report.docs += 1;
@@ -404,32 +459,51 @@ pub(crate) fn stage_table(tx: &mut Transaction, schema: &str, u: &Unit, ids: &Su
             Err(reason) => report.rejects.push(Reject { id: label, reason, document: Some(node.into_relaxed_extjson()) }),
         }
     }
-    copy.finish()?;
+    copy.into_inner().map_err(|e| e.into_error())?.finish()?;
+    trace(p.table_name, "read + copy", t0);
+    let t0 = std::time::Instant::now();
+    tx.batch_execute("analyze lift_tmp")?;
+    trace(p.table_name, "analyze", t0);
 
+    // every parent key, kept for the child tables (indexed, so children match by join)
+    if !u.children.is_empty() {
+        tx.batch_execute(&format!(
+            "drop table if exists lift_keys;
+             create temp table lift_keys on commit drop as select {pk} k from lift_tmp;
+             create index on lift_keys (k);
+             analyze lift_keys",
+            pk = ident(&u.pk)
+        ))?;
+    }
+
+    let t0 = std::time::Instant::now();
     drop_orphans(tx, schema, p, &mut report)?;
-
+    trace(p.table_name, "orphans", t0);
     Ok(report)
 }
 
 fn load_children(tx: &mut Transaction, schema: &str, u: &Unit, c: &Child, ids: &Suffix, opts: &Options) -> Result<Report> {
     let p = &c.plan;
-    let (mut report, parent_keys) = stage_children(tx, schema, u, c, ids, opts.dump)?;
+    let mut report = stage_children(tx, schema, u, c, ids, opts.dump)?;
     if report.missing {
         return Ok(report);
     }
 
     // replace the children of every parent in the dump, so re-runs don't pile up rows
     let cols = insert_cols(p);
+    let t0 = std::time::Instant::now();
     tx.execute(
-        &format!("delete from {} where {}::text = any($1)", target(schema, p), ident(c.parent_key)),
-        &[&parent_keys],
+        &format!("delete from {} where {} in (select k from lift_keys)", target(schema, p), ident(c.parent_key)),
+        &[],
     )?;
-    report.loaded = tx.execute(&format!("insert into {} ({cols}) select {cols} from lift_tmp", target(schema, p)), &[])?;
+    trace(p.table_name, "delete old children", t0);
+    let t = target(schema, p);
+    report.loaded = insert_without_fks(tx, &t, &format!("insert into {t} ({cols}) select {cols} from lift_tmp"))?;
     Ok(report)
 }
 
-/// Child rows for every parent into `lift_tmp`, orphans dropped. Also returns every parent key in
-/// the dump, including parents whose array is empty.
+/// Child rows for every parent into `lift_tmp`, orphans dropped. Expects `lift_keys` (every parent
+/// key) from staging the parent table just before.
 pub(crate) fn stage_children(
     tx: &mut Transaction,
     schema: &str,
@@ -437,22 +511,21 @@ pub(crate) fn stage_children(
     c: &Child,
     ids: &Suffix,
     dump_dir: &Path,
-) -> Result<(Report, Vec<String>)> {
+) -> Result<Report> {
     let p = &c.plan;
     let mut report = Report { table: p.table_name.into(), ..Default::default() };
-    let mut parent_keys = Vec::new();
     let Some(docs) = dump::open(dump_dir, u.collection)? else {
         report.missing = true;
-        return Ok((report, parent_keys));
+        return Ok(report);
     };
-    let mut copy = start_copy(tx, schema, p)?;
+    let t0 = std::time::Instant::now();
+    let mut copy = std::io::BufWriter::with_capacity(1 << 20, start_copy(tx, schema, p)?);
     for doc in docs {
         let doc = doc?;
         // the parent's key, converted the same way as in its own table
         let Some(key) = parent_key(&doc, u, ids) else { continue };
-        parent_keys.push(key.clone());
         let Some(Bson::Array(items)) = convert::lookup(&doc, c.array) else { continue };
-        let parent_label = doc_id(&Bson::Document(doc.clone()));
+        let parent_label = id_label(doc.get("_id"));
         for (i, item) in items.iter().enumerate() {
             report.docs += 1;
             let label = format!("{parent_label}.{}[{i}]", c.array);
@@ -465,11 +538,13 @@ pub(crate) fn stage_children(
             }
         }
     }
-    copy.finish()?;
-
+    copy.into_inner().map_err(|e| e.into_error())?.finish()?;
+    trace(p.table_name, "read + copy", t0);
+    let t0 = std::time::Instant::now();
+    tx.batch_execute("analyze lift_tmp")?;
     drop_orphans(tx, schema, p, &mut report)?;
-
-    Ok((report, parent_keys))
+    trace(p.table_name, "analyze + orphans", t0);
+    Ok(report)
 }
 
 /// A temp table shaped like the target, plus `lift_ref` naming each row's source for rejects.
@@ -592,10 +667,21 @@ fn write_rejects(dir: &Path, collection: &str, lines: &[String]) -> Result<()> {
 }
 
 fn doc_id(node: &Bson) -> String {
-    match node.as_document().and_then(|d| d.get("_id")) {
+    id_label(node.as_document().and_then(|d| d.get("_id")))
+}
+
+fn id_label(id: Option<&Bson>) -> String {
+    match id {
         Some(Bson::ObjectId(o)) => o.to_hex(),
         Some(other) => other.clone().into_relaxed_extjson().to_string(),
         None => "(no _id)".into(),
+    }
+}
+
+/// With LIFT_TRACE set, print how long each phase took, to see where a slow load spends its time.
+pub(crate) fn trace(table: &str, phase: &str, since: std::time::Instant) {
+    if std::env::var_os("LIFT_TRACE").is_some() {
+        eprintln!("trace {table:<28} {phase:<22} {:>8.2}s", since.elapsed().as_secs_f64());
     }
 }
 

@@ -20,7 +20,7 @@ pub struct Collection {
 pub fn open(dir: &Path, collection: &str) -> Result<Option<Collection>> {
     let Some(path) = find(dir, collection)? else { return Ok(None) };
     let file = File::open(&path).with_context(|| format!("open {}", path.display()))?;
-    Ok(Some(Collection { reader: BufReader::new(file), path }))
+    Ok(Some(Collection { reader: BufReader::with_capacity(1 << 20, file), path }))
 }
 
 fn find(dir: &Path, collection: &str) -> Result<Option<PathBuf>> {
