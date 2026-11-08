@@ -37,6 +37,11 @@ pub struct Check {
     pub fingerprint: String,
     pub child: bool,
     pub not_in_dump: bool,
+    /// reject reasons, most common first
+    pub reasons: Vec<(String, usize)>,
+    /// column -> rows filled with Go's zero value / rows where a zero ObjectId became NULL
+    pub zero_filled: Vec<(String, usize)>,
+    pub zero_ids: Vec<(String, usize)>,
 }
 
 impl Check {
@@ -183,12 +188,22 @@ fn check_children(tx: &mut Transaction, schema: &str, c: &Child, staged: &Report
 }
 
 fn base(staged: &Report, child: bool) -> Check {
+    let mut reasons: std::collections::BTreeMap<&str, usize> = Default::default();
+    for r in &staged.rejects {
+        *reasons.entry(r.reason.as_str()).or_default() += 1;
+    }
+    let mut reasons: Vec<(String, usize)> = reasons.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+    reasons.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let list = |m: &std::collections::BTreeMap<String, usize>| m.iter().map(|(k, v)| (k.clone(), *v)).collect();
     Check {
         table: staged.table.clone(),
         docs: staged.docs,
         rejected: staged.rejects.len(),
         child,
         not_in_dump: staged.missing,
+        reasons,
+        zero_filled: list(&staged.counts.zero_filled),
+        zero_ids: list(&staged.counts.zero_ids),
         ..Default::default()
     }
 }

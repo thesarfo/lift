@@ -3,6 +3,7 @@ mod dump;
 mod ids;
 mod load;
 mod mapping;
+mod report;
 mod schema;
 mod verify;
 
@@ -22,6 +23,7 @@ usage:
 options:
   --db URL        Postgres connection string (or set LIFT_DATABASE_URL)
   --rejects DIR   where rejected documents go (default: lift-rejects)
+  --report FILE   verify only: also write an HTML report for sign-off
 ";
 
 struct Args {
@@ -30,6 +32,7 @@ struct Args {
     dump: PathBuf,
     db: String,
     rejects: PathBuf,
+    report: Option<PathBuf>,
 }
 
 fn main() {
@@ -44,6 +47,9 @@ fn real_main() -> Result<()> {
         print!("{USAGE}");
         return Ok(());
     };
+    if args.report.is_some() && args.cmd != "verify" {
+        bail!("--report only works with verify");
+    }
     let m = mapping::load(&args.mapping)?;
     let mut db = Client::connect(&args.db, NoTls).context("connect to postgres")?;
 
@@ -60,6 +66,10 @@ fn real_main() -> Result<()> {
         "verify" => {
             let checks = verify::run(&mut db, &m, &args.dump)?;
             print_checks(&checks);
+            if let Some(path) = &args.report {
+                report::write(path, &checks, &report::Meta { mapping: &args.mapping, dump: &args.dump, db: &args.db })?;
+                println!("\nreport written to {}", path.display());
+            }
             let bad: Vec<&str> = checks.iter().filter(|c| !c.ok()).map(|c| c.table.as_str()).collect();
             if !bad.is_empty() {
                 bail!("{} table(s) don't match the dump: {}", bad.len(), bad.join(", "));
@@ -137,12 +147,14 @@ fn parse() -> Result<Option<Args>> {
     let mut dump = None;
     let mut db = env::var("LIFT_DATABASE_URL").ok();
     let mut rejects = PathBuf::from("lift-rejects");
+    let mut report = None;
     while let Some(a) = it.next() {
         let mut value = || it.next().with_context(|| format!("{a} needs a value"));
         match a.as_str() {
             "--dump" => dump = Some(PathBuf::from(value()?)),
             "--db" => db = Some(value()?),
             "--rejects" => rejects = PathBuf::from(value()?),
+            "--report" => report = Some(PathBuf::from(value()?)),
             s if s.starts_with('-') => bail!("unknown option {s}"),
             _ if mapping.is_none() => mapping = Some(PathBuf::from(&a)),
             _ => bail!("unexpected argument {a:?}"),
@@ -154,5 +166,6 @@ fn parse() -> Result<Option<Args>> {
         dump: dump.context("missing --dump DIR")?,
         db: db.context("missing --db URL (or LIFT_DATABASE_URL)")?,
         rejects,
+        report,
     }))
 }

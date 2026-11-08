@@ -19,6 +19,8 @@ lift verify mapping.toml --dump dump    # every document in its table?
 
 `verify` converts every document again and has Postgres compare it with what's stored, value by value. It reports rows that are missing, rows whose values differ (and which columns), and rows that didn't come from the dump. Each table gets a fingerprint of its migrated rows; record it at sign-off to show nothing changed since. It exits non-zero if anything is missing or different. Columns rewritten by an `after` hook will show as different.
 
+Add `--report report.html` to also write a single-file HTML report for whoever signs off the migration: the verdict, every table's counts and fingerprint, and per table which columns differ, why documents were rejected, and what was filled in. Passwords in the connection string are left out.
+
 ## Mapping
 
 ```toml
