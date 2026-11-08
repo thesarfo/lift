@@ -4,6 +4,16 @@ Move a MongoDB dump into a Postgres schema you already designed, and check nothi
 
 You write a mapping file from collections to tables. lift reads the target schema from Postgres itself, loads in foreign-key order, and tells you about every document that didn't fit.
 
+## Install
+
+```sh
+git clone git@github.com:thesarfo/lift.git
+cd lift
+./install.sh
+```
+
+Or unpack a release tarball and run `./install.sh` inside it. This puts `lift` in `~/.local/bin`; remove it with `./install.sh uninstall`.
+
 ## Use
 
 ```sh
