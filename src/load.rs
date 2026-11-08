@@ -121,8 +121,9 @@ pub fn run(db: &mut Client, m: &Mapping, opts: &Options) -> Result<Vec<Report>> 
         reports.push((unit.collection.to_string(), r));
         for child in &unit.children {
             let t0 = std::time::Instant::now();
-            let mut r = load_children(&mut tx, &m.schema, unit, child, &ids, opts)
-                .with_context(|| format!("loading {} from {}.{}", child.plan.table_name, unit.collection, child.array))?;
+            let mut r = load_children(&mut tx, &m.schema, unit, child, &ids, opts).with_context(|| {
+                format!("loading {} from {}.{}", child.plan.table_name, unit.collection, child.array)
+            })?;
             r.elapsed = t0.elapsed();
             reports.push((unit.collection.to_string(), r));
         }
@@ -210,7 +211,10 @@ pub(crate) fn order_units(units: &mut BTreeMap<String, Unit>) -> Result<Vec<Stri
                 let before = relaxed.len();
                 relaxed.extend(cycle);
                 if relaxed.len() == before {
-                    bail!("foreign keys form a cycle through NOT NULL columns, so no load order works: {}", stuck.join(", "));
+                    bail!(
+                        "foreign keys form a cycle through NOT NULL columns, so no load order works: {}",
+                        stuck.join(", ")
+                    );
                 }
             }
         }
@@ -226,8 +230,15 @@ pub(crate) fn order_units(units: &mut BTreeMap<String, Unit>) -> Result<Vec<Stri
             .collect();
         u.plan.deferred.extend(defer);
         for c in &u.children {
-            if let Some((col, fk)) = mapped_fks(&c.plan).find(|(_, fk)| owner.get(&fk.ref_table).is_some_and(|o| pos[o.as_str()] > i)) {
-                bail!("{}.{} references {}, which loads later; lift can't defer child-table columns", c.plan.table_name, col.name, fk.ref_table);
+            if let Some((col, fk)) =
+                mapped_fks(&c.plan).find(|(_, fk)| owner.get(&fk.ref_table).is_some_and(|o| pos[o.as_str()] > i))
+            {
+                bail!(
+                    "{}.{} references {}, which loads later; lift can't defer child-table columns",
+                    c.plan.table_name,
+                    col.name,
+                    fk.ref_table
+                );
             }
         }
     }
@@ -235,7 +246,10 @@ pub(crate) fn order_units(units: &mut BTreeMap<String, Unit>) -> Result<Vec<Stri
 }
 
 pub(crate) fn mapped_fks<'p>(p: &'p Plan) -> impl Iterator<Item = (&'p Column, &'p schema::ForeignKey)> {
-    p.table.foreign_keys.iter().filter_map(|fk| p.columns.iter().find(|(c, _)| c.name == fk.column).map(|(c, _)| (*c, fk)))
+    p.table
+        .foreign_keys
+        .iter()
+        .filter_map(|fk| p.columns.iter().find(|(c, _)| c.name == fk.column).map(|(c, _)| (*c, fk)))
 }
 
 /// Write deferred references: valid ones are filled in, ones pointing at nothing stay NULL.
@@ -251,7 +265,10 @@ fn fill_deferred(tx: &mut Transaction, schema: &str, u: &Unit, i: usize) -> Resu
             ident(&fk.ref_table),
             ident(&fk.ref_column)
         );
-        for r in tx.query(&format!("select d.{pk}::text, d.{c}::text from lift_def_{i} d where d.{c} is not null and not {exists}"), &[])? {
+        for r in tx.query(
+            &format!("select d.{pk}::text, d.{c}::text from lift_def_{i} d where d.{c} is not null and not {exists}"),
+            &[],
+        )? {
             let value: String = r.get(1);
             nulled.push(Reject {
                 id: r.get(0),
@@ -296,7 +313,8 @@ pub(crate) fn plan<'a>(m: &'a Mapping, tables: &'a HashMap<String, Table>) -> Re
             if ctable.column(&cm.parent_key).is_none() {
                 problems.push(format!("{}: parent_key {:?} is not a column", cm.table, cm.parent_key));
             }
-            let plan = plan_columns(&cm.table, ctable, &cm.columns, Some(&cm.parent_key), m.go_zero_values, &mut problems);
+            let plan =
+                plan_columns(&cm.table, ctable, &cm.columns, Some(&cm.parent_key), m.go_zero_values, &mut problems);
             children.push(Child { array: &cm.array, parent_key: &cm.parent_key, plan });
         }
 
@@ -420,8 +438,14 @@ fn insert_without_fks(tx: &mut Transaction, target: &str, insert: &str) -> Resul
         .collect();
     let dropped = !fks.is_empty() && {
         let mut sp = tx.transaction()?;
-        let ok = fks.iter().all(|(name, _)| sp.batch_execute(&format!("alter table {target} drop constraint {}", ident(name))).is_ok());
-        if ok { sp.commit()? } else { sp.rollback()? }
+        let ok = fks.iter().all(|(name, _)| {
+            sp.batch_execute(&format!("alter table {target} drop constraint {}", ident(name))).is_ok()
+        });
+        if ok {
+            sp.commit()?
+        } else {
+            sp.rollback()?
+        }
         ok
     };
     let t0 = std::time::Instant::now();
@@ -440,7 +464,13 @@ fn insert_without_fks(tx: &mut Transaction, target: &str, insert: &str) -> Resul
 
 /// Convert every document into `lift_tmp` (typed like the target) and drop rows whose references
 /// point at nothing. What's left is exactly what the table should hold. Used by `run` and `verify`.
-pub(crate) fn stage_table(tx: &mut Transaction, schema: &str, u: &Unit, ids: &Suffix, dump_dir: &Path) -> Result<Report> {
+pub(crate) fn stage_table(
+    tx: &mut Transaction,
+    schema: &str,
+    u: &Unit,
+    ids: &Suffix,
+    dump_dir: &Path,
+) -> Result<Report> {
     let p = &u.plan;
     let mut report = Report { table: p.table_name.into(), ..Default::default() };
     let Some(docs) = dump::open(dump_dir, u.collection)? else {
@@ -456,7 +486,9 @@ pub(crate) fn stage_table(tx: &mut Transaction, schema: &str, u: &Unit, ids: &Su
         let label = doc_id(&node);
         match row(&ctx, p, ids, &label, &mut report.counts) {
             Ok(line) => copy.write_all(line.as_bytes())?,
-            Err(reason) => report.rejects.push(Reject { id: label, reason, document: Some(node.into_relaxed_extjson()) }),
+            Err(reason) => {
+                report.rejects.push(Reject { id: label, reason, document: Some(node.into_relaxed_extjson()) })
+            }
         }
     }
     copy.into_inner().map_err(|e| e.into_error())?.finish()?;
@@ -482,7 +514,14 @@ pub(crate) fn stage_table(tx: &mut Transaction, schema: &str, u: &Unit, ids: &Su
     Ok(report)
 }
 
-fn load_children(tx: &mut Transaction, schema: &str, u: &Unit, c: &Child, ids: &Suffix, opts: &Options) -> Result<Report> {
+fn load_children(
+    tx: &mut Transaction,
+    schema: &str,
+    u: &Unit,
+    c: &Child,
+    ids: &Suffix,
+    opts: &Options,
+) -> Result<Report> {
     let p = &c.plan;
     let mut report = stage_children(tx, schema, u, c, ids, opts.dump)?;
     if report.missing {
@@ -532,9 +571,11 @@ pub(crate) fn stage_children(
             let ctx = Ctx { node: item, parent: Some(&doc), parent_key: Some(&key) };
             match row(&ctx, p, ids, &label, &mut report.counts) {
                 Ok(line) => copy.write_all(line.as_bytes())?,
-                Err(reason) => {
-                    report.rejects.push(Reject { id: label, reason, document: Some(item.clone().into_relaxed_extjson()) })
-                }
+                Err(reason) => report.rejects.push(Reject {
+                    id: label,
+                    reason,
+                    document: Some(item.clone().into_relaxed_extjson()),
+                }),
             }
         }
     }
@@ -580,8 +621,13 @@ fn drop_orphans(tx: &mut Transaction, schema: &str, p: &Plan, report: &mut Repor
         );
         for r in tx.query(&sql, &[])? {
             let value: String = r.get(1);
-            let why = if value == NIL { "is Go's zero id (unset)".to_string() } else { format!("{value} doesn't exist") };
-            report.rejects.push(Reject { id: r.get(0), reason: format!("{} -> {}: {why}", fk.column, fk.ref_table), document: None });
+            let why =
+                if value == NIL { "is Go's zero id (unset)".to_string() } else { format!("{value} doesn't exist") };
+            report.rejects.push(Reject {
+                id: r.get(0),
+                reason: format!("{} -> {}: {why}", fk.column, fk.ref_table),
+                document: None,
+            });
         }
     }
     Ok(())
@@ -640,7 +686,12 @@ fn row(ctx: &Ctx, p: &Plan, ids: &Suffix, label: &str, counts: &mut Counts) -> R
 
 /// Columns written by the insert: everything except deferred references.
 fn insert_cols(p: &Plan) -> String {
-    p.columns.iter().filter(|(c, _)| !p.deferred.contains(&c.name)).map(|(c, _)| ident(&c.name)).collect::<Vec<_>>().join(", ")
+    p.columns
+        .iter()
+        .filter(|(c, _)| !p.deferred.contains(&c.name))
+        .map(|(c, _)| ident(&c.name))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn col_list(p: &Plan) -> String {
@@ -712,11 +763,7 @@ mod tests {
     #[test]
     fn child_row_takes_element_fields_parent_key_and_parent_fields() {
         let t = Table {
-            columns: vec![
-                col("Year", "int4", false),
-                col("ProgramId", "uuid", false),
-                col("OrgName", "text", true),
-            ],
+            columns: vec![col("Year", "int4", false), col("ProgramId", "uuid", false), col("OrgName", "text", true)],
             ..Default::default()
         };
         let p = plan_for(
@@ -857,8 +904,8 @@ mod db_tests {
             "users",
             &[
                 doc! { "_id": u1, "zone_id": z1 },
-                doc! { "_id": u2, "zone_id": ObjectId::new() },                 // zone was deleted
-                doc! { "_id": u3, "zone_id": ObjectId::from_bytes([0; 12]) },  // Go's "unset"
+                doc! { "_id": u2, "zone_id": ObjectId::new() }, // zone was deleted
+                doc! { "_id": u3, "zone_id": ObjectId::from_bytes([0; 12]) }, // Go's "unset"
             ],
         );
         write("zones", &[doc! { "_id": z1, "provider": u1 }]);

@@ -111,11 +111,15 @@ fn check_table(tx: &mut Transaction, schema: &str, u: &Unit, staged: &Report) ->
     check.expected = tx.query_one("select count(*) from lift_tmp", &[])?.get(0);
     check.missing = tx.query_one(&format!("select count(*) from lift_tmp e where {absent}"), &[])?.get(0);
     check.extra = tx
-        .query_one(&format!("select count(*) from {t} t where not exists (select 1 from lift_tmp e where e.{pk} = t.{pk})"), &[])?
+        .query_one(
+            &format!("select count(*) from {t} t where not exists (select 1 from lift_tmp e where e.{pk} = t.{pk})"),
+            &[],
+        )?
         .get(0);
 
     // per-column differences on rows that are present
-    let per_col: Vec<String> = cols.iter().map(|c| format!("count(*) filter (where e.{c} is distinct from t.{c})")).collect();
+    let per_col: Vec<String> =
+        cols.iter().map(|c| format!("count(*) filter (where e.{c} is distinct from t.{c})")).collect();
     let row = tx.query_one(
         &format!("select count(*) filter (where {row_e} is distinct from {row_t}), {} from {join}", per_col.join(", ")),
         &[],
@@ -151,14 +155,19 @@ fn check_children(tx: &mut Transaction, schema: &str, c: &Child, staged: &Report
     let t = target(schema, p);
     let pkey = ident(c.parent_key);
     let cols = p.columns.iter().map(|(c, _)| ident(&c.name)).collect::<Vec<_>>().join(", ");
-    let per_parent = |from: &str| format!("select {pkey} k, {DIGEST} from (select {pkey}, row({cols})::text m from {from}) x group by 1");
+    let per_parent = |from: &str| {
+        format!("select {pkey} k, {DIGEST} from (select {pkey}, row({cols})::text m from {from}) x group by 1")
+    };
     // children of every parent in the dump (lift_keys comes from staging the parent)
     let stored = format!("{t} where {pkey} in (select k from lift_keys)");
 
     check.expected = tx.query_one("select count(*) from lift_tmp", &[])?.get(0);
     let present: i64 = tx.query_one(&format!("select count(*) from {stored}"), &[])?.get(0);
     check.extra = tx
-        .query_one(&format!("select count(*) from {t} c where not exists (select 1 from lift_keys k where k.k = c.{pkey})"), &[])?
+        .query_one(
+            &format!("select count(*) from {t} c where not exists (select 1 from lift_keys k where k.k = c.{pkey})"),
+            &[],
+        )?
         .get(0);
 
     let differing = tx.query(
@@ -176,7 +185,14 @@ fn check_children(tx: &mut Transaction, schema: &str, c: &Child, staged: &Report
     check.samples = differing
         .iter()
         .take(10)
-        .map(|r| format!("parent {}: expected {} rows, found {}", r.get::<_, String>(0), r.get::<_, i64>(1), r.get::<_, i64>(2)))
+        .map(|r| {
+            format!(
+                "parent {}: expected {} rows, found {}",
+                r.get::<_, String>(0),
+                r.get::<_, i64>(1),
+                r.get::<_, i64>(2)
+            )
+        })
         .collect();
     check.fingerprint = tx.query_one(&fingerprint_sql(&format!("select row({cols})::text from {stored}")), &[])?.get(0);
     Ok(check)
@@ -185,7 +201,8 @@ fn check_children(tx: &mut Transaction, schema: &str, c: &Child, staged: &Report
 /// Hash each row's text two ways (64 bits each) and sum the hashes: an order-independent digest,
 /// so no sort is needed and it stays linear on big tables. Any changed, added or removed row
 /// changes the sums. `m` is the row as text.
-const DIGEST: &str = "count(*) n, coalesce(sum(hashtextextended(m, 0)), 0) a, coalesce(sum(hashtextextended(m, 1)), 0) b";
+const DIGEST: &str =
+    "count(*) n, coalesce(sum(hashtextextended(m, 0)), 0) a, coalesce(sum(hashtextextended(m, 1)), 0) b";
 
 fn fingerprint_sql(rows: &str) -> String {
     format!("select md5(n || ':' || a || ':' || b) from (select {DIGEST} from ({rows}) r0(m)) d")

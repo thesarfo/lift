@@ -52,7 +52,9 @@ impl Iterator for Collection {
     fn next(&mut self) -> Option<Self::Item> {
         match self.reader.fill_buf() {
             Ok([]) => None,
-            Ok(_) => Some(Document::from_reader(&mut self.reader).with_context(|| format!("bad bson in {}", self.path.display()))),
+            Ok(_) => Some(
+                Document::from_reader(&mut self.reader).with_context(|| format!("bad bson in {}", self.path.display())),
+            ),
             Err(e) => Some(Err(e.into())),
         }
     }

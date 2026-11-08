@@ -81,7 +81,10 @@ mod tests {
     fn string_ids() {
         let s = suffix();
         assert_eq!(s.uuid_from_str("507f1f77bcf86cd799439011").unwrap(), "507f1f77-bcf8-6cd7-9943-90116c696674");
-        assert_eq!(s.uuid_from_str("10000000-0000-0000-0000-000000000001").unwrap(), "10000000-0000-0000-0000-000000000001");
+        assert_eq!(
+            s.uuid_from_str("10000000-0000-0000-0000-000000000001").unwrap(),
+            "10000000-0000-0000-0000-000000000001"
+        );
         assert_eq!(s.uuid_from_str("not-an-id"), None);
     }
 

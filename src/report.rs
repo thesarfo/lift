@@ -64,9 +64,17 @@ fn render(checks: &[Check], meta: &Meta, generated: &str) -> String {
         r#"<div class="scroll"><table><thead><tr><th></th><th>Table</th><th>Docs</th><th>Rejected</th><th>Expected</th><th>Missing</th><th>Changed</th><th>Extra</th><th>Fingerprint</th></tr></thead><tbody>"#,
     );
     for c in checks {
-        let status = if !c.ok() { r#"<span class="dot bad" title="doesn't match">✕</span>"# } else { r#"<span class="dot ok" title="matches">✓</span>"# };
+        let status = if !c.ok() {
+            r#"<span class="dot bad" title="doesn't match">✕</span>"#
+        } else {
+            r#"<span class="dot ok" title="matches">✓</span>"#
+        };
         let name = if c.child { format!(r#"<span class="child">↳</span> {}"#, esc(&c.table)) } else { esc(&c.table) };
-        let fp = if c.not_in_dump { r#"<span class="muted">not in dump</span>"#.to_string() } else { format!("<code>{}</code>", esc(&c.fingerprint.chars().take(12).collect::<String>())) };
+        let fp = if c.not_in_dump {
+            r#"<span class="muted">not in dump</span>"#.to_string()
+        } else {
+            format!("<code>{}</code>", esc(&c.fingerprint.chars().take(12).collect::<String>()))
+        };
         let _ = write!(
             h,
             "<tr{cls}><td>{status}</td><td>{name}</td><td>{}</td><td>{}</td><td>{}</td><td{}>{}</td><td{}>{}</td><td>{}</td><td>{fp}</td></tr>",
@@ -226,7 +234,12 @@ mod tests {
 
     #[test]
     fn failing_table_flips_the_verdict_and_is_escaped() {
-        let bad = Check { table: "<orders>".into(), changed: 1, changed_columns: vec![("status".into(), 1)], ..Default::default() };
+        let bad = Check {
+            table: "<orders>".into(),
+            changed: 1,
+            changed_columns: vec![("status".into(), 1)],
+            ..Default::default()
+        };
         let good = Check { table: "customers".into(), ..Default::default() };
         let html = render(&[good, bad], &meta(), "now");
         assert!(html.contains(">FAIL<"));

@@ -63,24 +63,30 @@ fn main() {
 
     let mut w = writer(&dir, "products");
     for i in 0..products {
-        put(&mut w, &doc! {
-            "_id": oid(1, i),
-            "sku": format!("SKU-{i:06}"),
-            "name": format!("Product {i}"),
-            "price": (rng.below(100_000) as f64) / 100.0,
-        });
+        put(
+            &mut w,
+            &doc! {
+                "_id": oid(1, i),
+                "sku": format!("SKU-{i:06}"),
+                "name": format!("Product {i}"),
+                "price": (rng.below(100_000) as f64) / 100.0,
+            },
+        );
     }
     w.flush().unwrap();
 
     let mut w = writer(&dir, "customers");
     for i in 0..customers {
         let at = DateTime::from_millis(epoch_ms + rng.below(31_536_000_000) as i64);
-        put(&mut w, &doc! {
-            "_id": oid(2, i),
-            "name": format!("Customer {i}"),
-            "email": format!("customer{i}@example.com"),
-            "meta": { "created_at": at, "updated_at": at },
-        });
+        put(
+            &mut w,
+            &doc! {
+                "_id": oid(2, i),
+                "name": format!("Customer {i}"),
+                "email": format!("customer{i}@example.com"),
+                "meta": { "created_at": at, "updated_at": at },
+            },
+        );
     }
     w.flush().unwrap();
 
@@ -99,15 +105,18 @@ fn main() {
             })
             .collect();
         let at = DateTime::from_millis(epoch_ms + rng.below(31_536_000_000) as i64);
-        put(&mut w, &doc! {
-            "_id": oid(3, i),
-            "customer_id": customer,
-            "status": statuses[rng.below(5) as usize],
-            "currency": "GHS",
-            "placed_at": at,
-            "items": items,
-            "meta": { "created_at": at, "updated_at": at },
-        });
+        put(
+            &mut w,
+            &doc! {
+                "_id": oid(3, i),
+                "customer_id": customer,
+                "status": statuses[rng.below(5) as usize],
+                "currency": "GHS",
+                "placed_at": at,
+                "items": items,
+                "meta": { "created_at": at, "updated_at": at },
+            },
+        );
     }
     w.flush().unwrap();
     eprintln!("wrote {products} products, {customers} customers, {orders} orders to {}", dir.display());
