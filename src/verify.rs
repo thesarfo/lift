@@ -42,6 +42,7 @@ pub struct Check {
     /// column -> rows filled with Go's zero value / rows where a zero ObjectId became NULL
     pub zero_filled: Vec<(String, usize)>,
     pub zero_ids: Vec<(String, usize)>,
+    pub elapsed: std::time::Duration,
 }
 
 impl Check {
@@ -60,11 +61,17 @@ pub fn run(db: &mut Client, m: &Mapping, dump_dir: &std::path::Path) -> Result<V
     let mut checks = Vec::new();
     for name in &order {
         let u = &units[name];
+        let t0 = std::time::Instant::now();
         let staged = load::stage_table(&mut tx, &m.schema, u, &ids, dump_dir)?;
-        checks.push(check_table(&mut tx, &m.schema, u, &staged)?);
+        let mut check = check_table(&mut tx, &m.schema, u, &staged)?;
+        check.elapsed = t0.elapsed();
+        checks.push(check);
         for c in &u.children {
-            let (staged, keys) = load::stage_children(&mut tx, &m.schema, u, c, &ids, dump_dir)?;
-            checks.push(check_children(&mut tx, &m.schema, c, &staged, &keys)?);
+            let t0 = std::time::Instant::now();
+            let staged = load::stage_children(&mut tx, &m.schema, u, c, &ids, dump_dir)?;
+            let mut check = check_children(&mut tx, &m.schema, c, &staged)?;
+            check.elapsed = t0.elapsed();
+            checks.push(check);
         }
     }
     tx.rollback()?;
@@ -131,16 +138,11 @@ fn check_table(tx: &mut Transaction, schema: &str, u: &Unit, staged: &Report) ->
     )?;
     check.samples = samples.iter().map(|r| r.get(0)).collect();
 
-    check.fingerprint = tx
-        .query_one(
-            &format!("select coalesce(md5(string_agg(r, '|' order by r)), '') from (select {row_t}::text r from {join}) x"),
-            &[],
-        )?
-        .get(0);
+    check.fingerprint = tx.query_one(&fingerprint_sql(&format!("select {row_t}::text from {join}")), &[])?.get(0);
     Ok(check)
 }
 
-fn check_children(tx: &mut Transaction, schema: &str, c: &Child, staged: &Report, keys: &[String]) -> Result<Check> {
+fn check_children(tx: &mut Transaction, schema: &str, c: &Child, staged: &Report) -> Result<Check> {
     let p = &c.plan;
     let mut check = base(staged, true);
     if staged.missing {
@@ -149,27 +151,25 @@ fn check_children(tx: &mut Transaction, schema: &str, c: &Child, staged: &Report
     let t = target(schema, p);
     let pkey = ident(c.parent_key);
     let cols = p.columns.iter().map(|(c, _)| ident(&c.name)).collect::<Vec<_>>().join(", ");
-    let per_parent = |from: &str| {
-        format!(
-            "select {pkey} k, count(*) n, md5(string_agg(r, '|' order by r)) h
-             from (select {pkey}, row({cols})::text r from {from}) x group by 1"
-        )
-    };
-    let stored = format!("{t} where {pkey}::text = any($1)");
+    let per_parent = |from: &str| format!("select {pkey} k, {DIGEST} from (select {pkey}, row({cols})::text m from {from}) x group by 1");
+    // children of every parent in the dump (lift_keys comes from staging the parent)
+    let stored = format!("{t} where {pkey} in (select k from lift_keys)");
 
     check.expected = tx.query_one("select count(*) from lift_tmp", &[])?.get(0);
-    let present: i64 = tx.query_one(&format!("select count(*) from {stored}"), &[&keys])?.get(0);
-    check.extra = tx.query_one(&format!("select count(*) from {t} where not ({pkey}::text = any($1))"), &[&keys])?.get(0);
+    let present: i64 = tx.query_one(&format!("select count(*) from {stored}"), &[])?.get(0);
+    check.extra = tx
+        .query_one(&format!("select count(*) from {t} c where not exists (select 1 from lift_keys k where k.k = c.{pkey})"), &[])?
+        .get(0);
 
     let differing = tx.query(
         &format!(
             "with e as ({}), t as ({})
              select coalesce(e.k, t.k)::text, coalesce(e.n, 0), coalesce(t.n, 0)
-             from e full join t on e.k = t.k where e.h is distinct from t.h",
+             from e full join t on e.k = t.k where (e.n, e.a, e.b) is distinct from (t.n, t.a, t.b)",
             per_parent("lift_tmp"),
             per_parent(&stored)
         ),
-        &[&keys],
+        &[],
     )?;
     check.changed = differing.len() as i64;
     check.missing = (check.expected - present).max(0);
@@ -178,13 +178,17 @@ fn check_children(tx: &mut Transaction, schema: &str, c: &Child, staged: &Report
         .take(10)
         .map(|r| format!("parent {}: expected {} rows, found {}", r.get::<_, String>(0), r.get::<_, i64>(1), r.get::<_, i64>(2)))
         .collect();
-    check.fingerprint = tx
-        .query_one(
-            &format!("select coalesce(md5(string_agg(r, '|' order by r)), '') from (select row({cols})::text r from {stored}) x"),
-            &[&keys],
-        )?
-        .get(0);
+    check.fingerprint = tx.query_one(&fingerprint_sql(&format!("select row({cols})::text from {stored}")), &[])?.get(0);
     Ok(check)
+}
+
+/// Hash each row's text two ways (64 bits each) and sum the hashes: an order-independent digest,
+/// so no sort is needed and it stays linear on big tables. Any changed, added or removed row
+/// changes the sums. `m` is the row as text.
+const DIGEST: &str = "count(*) n, coalesce(sum(hashtextextended(m, 0)), 0) a, coalesce(sum(hashtextextended(m, 1)), 0) b";
+
+fn fingerprint_sql(rows: &str) -> String {
+    format!("select md5(n || ':' || a || ':' || b) from (select {DIGEST} from ({rows}) r0(m)) d")
 }
 
 fn base(staged: &Report, child: bool) -> Check {
