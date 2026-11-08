@@ -55,7 +55,11 @@ lift fills `parent_key` with the parent's id. Paths are relative to the element;
 
 - ObjectIds become UUIDs made of the 12 ObjectId bytes plus `id_suffix`, so the original id can always be recovered. A zero ObjectId becomes the nil UUID.
 - `go_zero_values` fills required columns the document doesn't have with Go's zero value (`0`, `false`, `{}`, `0001-01-01`). The report counts every fill.
+- A zero ObjectId (Go's "unset") going into a nullable column is stored as NULL. In a required column it's rejected.
 - Documents that can't be stored, or that reference rows that don't exist, go to `lift-rejects/<collection>.jsonl` with the reason.
+- When foreign keys form a cycle (users → zones → users), lift writes the nullable side as NULL first and fills it in once both tables are loaded. A reference that points at nothing stays NULL and is reported.
+- `before` and `after` take SQL to run inside the load transaction, e.g. clearing seed rows that clash with the dump, or filling columns lift can't derive.
+- A collection that isn't in the dump loads as empty. mongodump skips empty collections.
 - Reads `mongodump` output only, never a live Mongo. Dump without `--gzip`.
 
 ## Build
