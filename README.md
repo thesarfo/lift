@@ -17,6 +17,8 @@ lift verify mapping.toml --dump dump    # every document in its table?
 
 `run` is safe to repeat: rows are upserted on their primary key.
 
+`verify` converts every document again and has Postgres compare it with what's stored, value by value. It reports rows that are missing, rows whose values differ (and which columns), and rows that didn't come from the dump. Each table gets a fingerprint of its migrated rows; record it at sign-off to show nothing changed since. It exits non-zero if anything is missing or different. Columns rewritten by an `after` hook will show as different.
+
 ## Mapping
 
 ```toml

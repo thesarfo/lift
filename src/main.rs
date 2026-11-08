@@ -59,19 +59,12 @@ fn real_main() -> Result<()> {
         }
         "verify" => {
             let checks = verify::run(&mut db, &m, &args.dump)?;
-            let mut ok = true;
-            println!("{:<24}{:>8}{:>10}{:>10}{:>8}", "table", "docs", "present", "missing", "extra");
-            for c in &checks {
-                let missing = c.docs as i64 - c.present;
-                ok &= missing == 0;
-                println!("{:<24}{:>8}{:>10}{:>10}{:>8}", c.table, c.docs, c.present, missing, c.extra);
-                if !c.missing.is_empty() {
-                    println!("    missing: {}", c.missing.join(", "));
-                }
+            print_checks(&checks);
+            let bad: Vec<&str> = checks.iter().filter(|c| !c.ok()).map(|c| c.table.as_str()).collect();
+            if !bad.is_empty() {
+                bail!("{} table(s) don't match the dump: {}", bad.len(), bad.join(", "));
             }
-            if !ok {
-                bail!("some documents are not in their tables (see {} for why)", args.rejects.display());
-            }
+            println!("\nevery table matches the dump (rejected documents are listed in {})", args.rejects.display());
         }
         _ => unreachable!(),
     }
@@ -108,6 +101,26 @@ fn print_reports(reports: &[load::Report], rejects: &std::path::Path) {
     }
     if reports.iter().any(|r| !r.rejects.is_empty() || !r.nulled_refs.is_empty()) {
         println!("\nrejected documents are in {}", rejects.display());
+    }
+}
+
+fn print_checks(checks: &[verify::Check]) {
+    println!(
+        "{:<34}{:>7}{:>10}{:>10}{:>9}{:>9}{:>7}  fingerprint",
+        "table", "docs", "rejected", "expected", "missing", "changed", "extra"
+    );
+    for c in checks {
+        let fp = if c.not_in_dump { "(not in dump)".to_string() } else { c.fingerprint.chars().take(12).collect() };
+        println!(
+            "{:<34}{:>7}{:>10}{:>10}{:>9}{:>9}{:>7}  {fp}",
+            c.table, c.docs, c.rejected, c.expected, c.missing, c.changed, c.extra
+        );
+        for (col, n) in &c.changed_columns {
+            println!("    {col} differs on {n} row(s)");
+        }
+        for s in &c.samples {
+            println!("    {s}");
+        }
     }
 }
 
