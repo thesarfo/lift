@@ -60,7 +60,7 @@ pub struct Reject {
     pub document: Option<serde_json::Value>,
 }
 
-enum Fill {
+pub(crate) enum Fill {
     Path(String),
     ParentPath(String),
     Const(Bson),
@@ -68,28 +68,28 @@ enum Fill {
     ParentKey,
 }
 
-struct Plan<'a> {
-    table_name: &'a str,
-    table: &'a Table,
-    columns: Vec<(&'a Column, Fill)>,
+pub(crate) struct Plan<'a> {
+    pub table_name: &'a str,
+    pub table: &'a Table,
+    pub columns: Vec<(&'a Column, Fill)>,
     /// go_zero_values: a mapped required field missing on one document gets Go's zero value
     zero_missing: bool,
     /// nullable foreign-key columns written after every table is loaded, to break FK cycles
-    deferred: BTreeSet<String>,
+    pub deferred: BTreeSet<String>,
 }
 
-struct Child<'a> {
-    array: &'a str,
-    parent_key: &'a str,
-    plan: Plan<'a>,
+pub(crate) struct Child<'a> {
+    pub array: &'a str,
+    pub parent_key: &'a str,
+    pub plan: Plan<'a>,
 }
 
 /// A collection: its own table plus any embedded arrays loaded into child tables.
-struct Unit<'a> {
-    collection: &'a str,
-    pk: String,
-    plan: Plan<'a>,
-    children: Vec<Child<'a>>,
+pub(crate) struct Unit<'a> {
+    pub collection: &'a str,
+    pub pk: String,
+    pub plan: Plan<'a>,
+    pub children: Vec<Child<'a>>,
 }
 
 /// Where a row's values come from: the document (or array element), its parent, the parent's key.
@@ -158,7 +158,7 @@ pub fn run(db: &mut Client, m: &Mapping, opts: &Options) -> Result<Vec<Report>> 
 /// Load order from foreign keys between mapped columns. If they form a cycle, order by the
 /// required ones only, and defer each nullable reference that points at a table loaded at the
 /// same point or later: it's written as NULL first and filled in at the end.
-fn order_units(units: &mut BTreeMap<String, Unit>) -> Result<Vec<String>> {
+pub(crate) fn order_units(units: &mut BTreeMap<String, Unit>) -> Result<Vec<String>> {
     let names: Vec<String> = units.keys().cloned().collect();
     let owner: HashMap<String, String> = units
         .iter()
@@ -229,7 +229,7 @@ fn order_units(units: &mut BTreeMap<String, Unit>) -> Result<Vec<String>> {
     Ok(order)
 }
 
-fn mapped_fks<'p>(p: &'p Plan) -> impl Iterator<Item = (&'p Column, &'p schema::ForeignKey)> {
+pub(crate) fn mapped_fks<'p>(p: &'p Plan) -> impl Iterator<Item = (&'p Column, &'p schema::ForeignKey)> {
     p.table.foreign_keys.iter().filter_map(|fk| p.columns.iter().find(|(c, _)| c.name == fk.column).map(|(c, _)| (*c, fk)))
 }
 
@@ -263,7 +263,7 @@ fn fill_deferred(tx: &mut Transaction, schema: &str, u: &Unit, i: usize) -> Resu
 }
 
 /// Check the mapping against the real schema before touching any data.
-fn plan<'a>(m: &'a Mapping, tables: &'a HashMap<String, Table>) -> Result<BTreeMap<String, Unit<'a>>> {
+pub(crate) fn plan<'a>(m: &'a Mapping, tables: &'a HashMap<String, Table>) -> Result<BTreeMap<String, Unit<'a>>> {
     let mut units = BTreeMap::new();
     let mut problems = Vec::new();
     let mut seen = BTreeSet::new();
@@ -350,25 +350,10 @@ fn plan_columns<'a>(
 
 fn load_table(tx: &mut Transaction, schema: &str, u: &Unit, i: usize, ids: &Suffix, opts: &Options) -> Result<Report> {
     let p = &u.plan;
-    let mut report = Report { table: p.table_name.into(), ..Default::default() };
-    let Some(docs) = dump::open(opts.dump, u.collection)? else {
-        report.missing = true;
+    let mut report = stage_table(tx, schema, u, ids, opts.dump)?;
+    if report.missing {
         return Ok(report);
-    };
-    let mut copy = start_copy(tx, schema, p)?;
-    for doc in docs {
-        let node = Bson::Document(doc?);
-        report.docs += 1;
-        let ctx = Ctx { node: &node, parent: None, parent_key: None };
-        let label = doc_id(&node);
-        match row(&ctx, p, ids, &label, &mut report.counts) {
-            Ok(line) => copy.write_all(line.as_bytes())?,
-            Err(reason) => report.rejects.push(Reject { id: label, reason, document: Some(node.into_relaxed_extjson()) }),
-        }
     }
-    copy.finish()?;
-
-    drop_orphans(tx, schema, p, &mut report)?;
 
     // deferred references are kept aside and written once every table is loaded
     let pk = ident(&u.pk);
@@ -399,13 +384,66 @@ fn load_table(tx: &mut Transaction, schema: &str, u: &Unit, i: usize, ids: &Suff
     Ok(report)
 }
 
+/// Convert every document into `lift_tmp` (typed like the target) and drop rows whose references
+/// point at nothing. What's left is exactly what the table should hold. Used by `run` and `verify`.
+pub(crate) fn stage_table(tx: &mut Transaction, schema: &str, u: &Unit, ids: &Suffix, dump_dir: &Path) -> Result<Report> {
+    let p = &u.plan;
+    let mut report = Report { table: p.table_name.into(), ..Default::default() };
+    let Some(docs) = dump::open(dump_dir, u.collection)? else {
+        report.missing = true;
+        return Ok(report);
+    };
+    let mut copy = start_copy(tx, schema, p)?;
+    for doc in docs {
+        let node = Bson::Document(doc?);
+        report.docs += 1;
+        let ctx = Ctx { node: &node, parent: None, parent_key: None };
+        let label = doc_id(&node);
+        match row(&ctx, p, ids, &label, &mut report.counts) {
+            Ok(line) => copy.write_all(line.as_bytes())?,
+            Err(reason) => report.rejects.push(Reject { id: label, reason, document: Some(node.into_relaxed_extjson()) }),
+        }
+    }
+    copy.finish()?;
+
+    drop_orphans(tx, schema, p, &mut report)?;
+
+    Ok(report)
+}
+
 fn load_children(tx: &mut Transaction, schema: &str, u: &Unit, c: &Child, ids: &Suffix, opts: &Options) -> Result<Report> {
+    let p = &c.plan;
+    let (mut report, parent_keys) = stage_children(tx, schema, u, c, ids, opts.dump)?;
+    if report.missing {
+        return Ok(report);
+    }
+
+    // replace the children of every parent in the dump, so re-runs don't pile up rows
+    let cols = insert_cols(p);
+    tx.execute(
+        &format!("delete from {} where {}::text = any($1)", target(schema, p), ident(c.parent_key)),
+        &[&parent_keys],
+    )?;
+    report.loaded = tx.execute(&format!("insert into {} ({cols}) select {cols} from lift_tmp", target(schema, p)), &[])?;
+    Ok(report)
+}
+
+/// Child rows for every parent into `lift_tmp`, orphans dropped. Also returns every parent key in
+/// the dump, including parents whose array is empty.
+pub(crate) fn stage_children(
+    tx: &mut Transaction,
+    schema: &str,
+    u: &Unit,
+    c: &Child,
+    ids: &Suffix,
+    dump_dir: &Path,
+) -> Result<(Report, Vec<String>)> {
     let p = &c.plan;
     let mut report = Report { table: p.table_name.into(), ..Default::default() };
     let mut parent_keys = Vec::new();
-    let Some(docs) = dump::open(opts.dump, u.collection)? else {
+    let Some(docs) = dump::open(dump_dir, u.collection)? else {
         report.missing = true;
-        return Ok(report);
+        return Ok((report, parent_keys));
     };
     let mut copy = start_copy(tx, schema, p)?;
     for doc in docs {
@@ -431,14 +469,7 @@ fn load_children(tx: &mut Transaction, schema: &str, u: &Unit, c: &Child, ids: &
 
     drop_orphans(tx, schema, p, &mut report)?;
 
-    // replace the children of every parent in the dump, so re-runs don't pile up rows
-    let cols = insert_cols(p);
-    tx.execute(
-        &format!("delete from {} where {}::text = any($1)", target(schema, p), ident(c.parent_key)),
-        &[&parent_keys],
-    )?;
-    report.loaded = tx.execute(&format!("insert into {} ({cols}) select {cols} from lift_tmp", target(schema, p)), &[])?;
-    Ok(report)
+    Ok((report, parent_keys))
 }
 
 /// A temp table shaped like the target, plus `lift_ref` naming each row's source for rejects.
@@ -541,7 +572,7 @@ fn col_list(p: &Plan) -> String {
     p.columns.iter().map(|(c, _)| ident(&c.name)).collect::<Vec<_>>().join(", ")
 }
 
-fn target(schema: &str, p: &Plan) -> String {
+pub(crate) fn target(schema: &str, p: &Plan) -> String {
     format!("{}.{}", ident(schema), ident(p.table_name))
 }
 
@@ -829,7 +860,24 @@ mod db_tests {
 
         let checks = verify::run(&mut db, &m, &dir).unwrap();
         let targets = checks.iter().find(|c| c.table == "Targets").unwrap();
-        assert_eq!((targets.docs, targets.present), (3, 2)); // the rejected parent's target is the gap
+        // the rejected parent's target is rejected too, and is not expected in the table
+        assert_eq!((targets.docs, targets.rejected, targets.expected), (3, 1, 2));
+        assert!(checks.iter().all(|c| c.ok()), "{checks:?}");
+
+        // a value changed behind lift's back is caught, with the column named
+        db.batch_execute(&format!("update {SCHEMA}.\"Programs\" set \"Name\" = 'Edited'")).unwrap();
+        db.batch_execute(&format!("update {SCHEMA}.\"Targets\" set \"Percent\" = 99 where \"Year\" = 2026")).unwrap();
+        let checks = verify::run(&mut db, &m, &dir).unwrap();
+        let programs = checks.iter().find(|c| c.table == "Programs").unwrap();
+        assert_eq!(programs.changed, 2);
+        assert_eq!(programs.changed_columns, [("Name".to_string(), 2)]);
+        let targets = checks.iter().find(|c| c.table == "Targets").unwrap();
+        assert_eq!(targets.changed, 1, "one parent's targets differ");
+
+        // and so is a row deleted behind lift's back
+        db.batch_execute(&format!("delete from {SCHEMA}.\"Targets\" where \"Year\" = 2025")).unwrap();
+        let checks = verify::run(&mut db, &m, &dir).unwrap();
+        assert_eq!(checks.iter().find(|c| c.table == "Targets").unwrap().missing, 1);
 
         let lines = fs::read_to_string(rejects.join("programs.jsonl")).unwrap();
         assert_eq!(lines.lines().count(), 2);
