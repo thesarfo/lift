@@ -37,6 +37,20 @@ Archived = { value = false }
 
 Columns map to dotted paths into the document, or to a fixed `value`. See [examples/shepherd.toml](examples/shepherd.toml) for a full one.
 
+An embedded array becomes rows in its own table, one per element:
+
+```toml
+[[table.children]]
+array = "yearly_targets"
+table = "YearlyTarget"
+parent_key = "VaccineProgramId"
+[table.children.columns]
+Year = "year"
+TargetPercentage = "target_percentage"
+```
+
+lift fills `parent_key` with the parent's id. Paths are relative to the element; `$value` is the element itself and `$parent.x` reads the parent. On a re-run, each parent's children are replaced rather than added again.
+
 ## Notes
 
 - ObjectIds become UUIDs made of the 12 ObjectId bytes plus `id_suffix`, so the original id can always be recovered. A zero ObjectId becomes the nil UUID.
@@ -49,3 +63,5 @@ Columns map to dotted paths into the document, or to a fixed `value`. See [examp
 ```sh
 cargo build --release
 ```
+
+The end-to-end test needs a scratch Postgres: `LIFT_TEST_DATABASE_URL=... cargo test`. Without it, that test is skipped.
