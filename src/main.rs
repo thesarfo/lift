@@ -82,10 +82,17 @@ fn real_main() -> Result<()> {
 }
 
 fn print_reports(reports: &[load::Report], rejects: &std::path::Path) {
-    println!("{:<34}{:>8}{:>8}{:>10}", "table", "docs", "loaded", "rejected");
+    println!("{:<34}{:>10}{:>10}{:>10}{:>9}", "table", "docs", "loaded", "rejected", "seconds");
     for r in reports {
         let note = if r.missing { "  (not in dump)" } else { "" };
-        println!("{:<34}{:>8}{:>8}{:>10}{note}", r.table, r.docs, r.loaded, r.rejects.len());
+        println!(
+            "{:<34}{:>10}{:>10}{:>10}{:>9.1}{note}",
+            r.table,
+            r.docs,
+            r.loaded,
+            r.rejects.len(),
+            r.elapsed.as_secs_f64()
+        );
         let mut reasons: BTreeMap<&str, usize> = BTreeMap::new();
         for rej in &r.rejects {
             *reasons.entry(rej.reason.as_str()).or_default() += 1;
@@ -116,14 +123,21 @@ fn print_reports(reports: &[load::Report], rejects: &std::path::Path) {
 
 fn print_checks(checks: &[verify::Check]) {
     println!(
-        "{:<34}{:>7}{:>10}{:>10}{:>9}{:>9}{:>7}  fingerprint",
-        "table", "docs", "rejected", "expected", "missing", "changed", "extra"
+        "{:<34}{:>10}{:>10}{:>10}{:>9}{:>9}{:>7}{:>9}  fingerprint",
+        "table", "docs", "rejected", "expected", "missing", "changed", "extra", "seconds"
     );
     for c in checks {
         let fp = if c.not_in_dump { "(not in dump)".to_string() } else { c.fingerprint.chars().take(12).collect() };
         println!(
-            "{:<34}{:>7}{:>10}{:>10}{:>9}{:>9}{:>7}  {fp}",
-            c.table, c.docs, c.rejected, c.expected, c.missing, c.changed, c.extra
+            "{:<34}{:>10}{:>10}{:>10}{:>9}{:>9}{:>7}{:>9.1}  {fp}",
+            c.table,
+            c.docs,
+            c.rejected,
+            c.expected,
+            c.missing,
+            c.changed,
+            c.extra,
+            c.elapsed.as_secs_f64()
         );
         for (col, n) in &c.changed_columns {
             println!("    {col} differs on {n} row(s)");

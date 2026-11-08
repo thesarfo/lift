@@ -65,6 +65,20 @@ lift fills `parent_key` with the parent's id. Paths are relative to the element;
 - A collection that isn't in the dump loads as empty. mongodump skips empty collections.
 - Reads `mongodump` output only, never a live Mongo. Dump without `--gzip`.
 
+## Speed
+
+On a laptop (8 cores, stock Postgres 16 settings), with [examples/gen_shop.rs](examples/gen_shop.rs) generating a 353 MB dump of 1M orders and 3M line items: `run` takes 86 s and `verify` 103 s, both using about 12 MB of memory. Time grows linearly, so 5 GB is roughly 20 minutes to load and 25 to verify.
+
+For the insert, lift drops a table's foreign keys and adds them back afterwards, which re-checks them in one pass instead of row by row. That needs permission to alter the table; without it lift falls back to the slower per-row checks. Set `LIFT_TRACE=1` to see how long each phase takes.
+
+To reproduce:
+
+```sh
+cargo run --release --example gen_shop -- bench 1000000
+psql -f examples/shop.sql
+cargo run --release -- run examples/shop.toml --dump bench
+```
+
 ## Build
 
 ```sh
