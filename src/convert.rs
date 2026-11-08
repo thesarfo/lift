@@ -18,6 +18,16 @@ pub fn lookup<'a>(doc: &'a Document, path: &str) -> Option<&'a Bson> {
     (!matches!(cur, Bson::Null | Bson::Undefined)).then_some(cur)
 }
 
+/// Like `lookup`, from any value: "$value" is the value itself, other paths need a document.
+pub fn lookup_in<'a>(root: &'a Bson, path: &str) -> Option<&'a Bson> {
+    match (path, root) {
+        ("$value", Bson::Null | Bson::Undefined) => None,
+        ("$value", v) => Some(v),
+        (_, Bson::Document(d)) => lookup(d, path),
+        _ => None,
+    }
+}
+
 /// The value as Postgres text input for a column of type `udt`. `_foo` is an array of `foo`.
 pub fn to_pg(v: &Bson, udt: &str, ids: &Suffix) -> Result<String, String> {
     if let Some(base) = udt.strip_prefix('_') {

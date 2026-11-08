@@ -13,6 +13,13 @@
 //! Name = "name"
 //! CreatedAt = "meta.created_at"
 //! Archived = { value = false }
+//!
+//! [[table.children]]
+//! array = "yearly_targets"
+//! table = "YearlyTarget"
+//! parent_key = "VaccineProgramId"
+//! [table.children.columns]
+//! Year = "year"
 //! ```
 
 use std::{collections::BTreeMap, path::Path};
@@ -38,6 +45,22 @@ pub struct Mapping {
 pub struct TableMap {
     pub collection: String,
     pub table: String,
+    pub columns: BTreeMap<String, Source>,
+    #[serde(default)]
+    pub children: Vec<ChildMap>,
+}
+
+/// An embedded array that becomes rows in its own table, one row per element.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChildMap {
+    /// Path to the array in the parent document.
+    pub array: String,
+    pub table: String,
+    /// Column in the child table that gets the parent row's primary key.
+    pub parent_key: String,
+    /// Paths are relative to the array element. "$value" is the element itself,
+    /// "$parent.x" reads from the parent document.
     pub columns: BTreeMap<String, Source>,
 }
 
