@@ -1,0 +1,60 @@
+# A small shop: customers, products, and orders with embedded line items.
+#
+# Mongo                                   Postgres
+#   customers { _id, name, email, meta }    customers (id uuid, name, email, created_at)
+#   products  { _id, sku, name, price }     products  (id uuid, sku, name, price numeric)
+#   orders    { _id, customer_id, status,   orders    (id uuid, customer_id -> customers, status, placed_at)
+#               currency, placed_at,        order_items (id serial, order_id -> orders,
+#               items: [ { product_id,                   product_id -> products, quantity,
+#                          qty, price } ] }               unit_price, currency)
+
+schema = "shop"
+id_suffix = "6c696674"   # any 8 hex chars; keep it fixed once ids are in use
+go_zero_values = false
+
+# Run before anything loads, inside the same transaction.
+before = [
+  "delete from shop.products where sku like 'DEMO-%'",   # seed rows that would clash with real ones
+]
+
+# Run after everything loads, before commit.
+after = [
+  "update shop.customers set email = lower(email)",
+]
+
+[[table]]
+collection = "customers"
+table = "customers"
+[table.columns]
+id = "_id"
+name = "name"
+email = "email"
+created_at = "meta.created_at"
+
+[[table]]
+collection = "products"
+table = "products"
+[table.columns]
+id = "_id"
+sku = "sku"
+name = "name"
+price = "price"
+
+[[table]]
+collection = "orders"
+table = "orders"
+[table.columns]
+id = "_id"
+customer_id = "customer_id"
+status = "status"
+placed_at = "placed_at"
+
+[[table.children]]
+array = "items"
+table = "order_items"
+parent_key = "order_id"     # filled with the order's id
+[table.children.columns]
+product_id = "product_id"
+quantity = "qty"
+unit_price = "price"
+currency = "$parent.currency"   # a field on the order, copied onto each item
