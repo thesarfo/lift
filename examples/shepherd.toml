@@ -1,0 +1,74 @@
+# Shepherd: Go/Mongo shepherd-api -> C#/Postgres shepherd-api-dotnet.
+# Field paths come from Go's bson tags in shepherd-api/pkg/models.
+
+schema = "shepherd"
+id_suffix = "53484550"   # "SHEP", same as Ids/ObjectIdGuid.cs in shepherd-api-dotnet
+go_zero_values = true
+
+[[table]]
+collection = "countries"
+table = "Countries"
+[table.columns]
+Id = "_id"
+Name = "name"
+
+[[table]]
+collection = "organizations"
+table = "Organizations"
+[table.columns]
+Id = "_id"
+Name = "name"
+CountryId = "country_id"
+Type = "type"
+Affiliation = "affiliation"
+RegistrationNumber = "registration_number"
+Socials_Website = "socials.website"
+Socials_Facebook = "socials.facebook"
+Socials_Twitter = "socials.twitter"
+Socials_LinkedIn = "socials.linkedin"
+Socials_Instagram = "socials.instagram"
+AdminFullName = "admin_full_name"
+AdminEmail = "admin_email"
+ContactInformation_Street = "contact_information.street"
+ContactInformation_City = "contact_information.city"
+ContactInformation_District = "contact_information.district"
+ContactInformation_Region = "contact_information.region"
+ContactInformation_CountryId = "contact_information.country_id"
+ContactInformation_PrimaryContactPerson_FullName = "contact_information.primary_contact_person.full_name"
+ContactInformation_PrimaryContactPerson_Role = "contact_information.primary_contact_person.role"
+ContactInformation_PrimaryContactPerson_Title = "contact_information.primary_contact_person.title"
+ContactInformation_PrimaryContactPerson_Email = "contact_information.primary_contact_person.email"
+ContactInformation_PrimaryContactPerson_Phone = "contact_information.primary_contact_person.phone"
+ContactInformation_SecondaryContact = "contact_information.secondary_contact"
+VaccinationProgram_Types = "vaccination_program.types"
+VaccinationProgram_TargetLiveStock = "vaccination_program.target_live_stock"
+VaccinationProgram_AnnualVaccinationVolume = "vaccination_program.annual_vaccination_volume"
+VaccinationProgram_NumberOfFarmersServed = "vaccination_program.number_of_farmers_served"
+VaccinationProgram_CampaignFrequency = "vaccination_program.campaign_frequency"
+SupplyChain_ColdChainInfrastructureAbility = "supply_chain.cold_chain_infrastructure_ability"
+SupplyChain_TypeOfStore = "supply_chain.type_of_store"
+SupplyChain_SupplierSource = "supply_chain.supplier_source"
+SupplyChain_TransportationMethod = "supply_chain.transportation_method"
+SupplyChain_ColdChainMonitoringSystem = "supply_chain.cold_chain_monitoring_system"
+SupplyChain_EmergencyStockManagement = "supply_chain.emergency_stock_management"
+HumanResource_NumberOfVeterinaryOfficers = "human_resource.number_of_vetinary_officers"   # sic, Go's tag
+HumanResource_NumberOfAnimalHealthProfessionals = "human_resource.number_of_animal_health_professionals"
+HumanResource_TrainingAndCertification = "human_resource.training_and_certification"
+HumanResource_ReportingAndDataCollectionMethod = "human_resource.reporting_and_data_collection_method"
+Archived = "meta.archived"
+CreatedByUserId = "meta.created_by"
+CreatedAt = "meta.created_at"
+UpdatedAt = "meta.updated_at"
+
+[[table]]
+collection = "species"
+table = "Species"
+[table.columns]
+Id = "_id"
+OrganizationId = "organization_id"
+Name = "name"
+ScientificName = "scientific_name"
+SpeciesType = "species_type"
+PrimaryUse = "primary_use"
+CreatedAt = "meta.created_at"
+UpdatedAt = "meta.updated_at"
