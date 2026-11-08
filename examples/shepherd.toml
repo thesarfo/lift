@@ -72,3 +72,32 @@ SpeciesType = "species_type"
 PrimaryUse = "primary_use"
 CreatedAt = "meta.created_at"
 UpdatedAt = "meta.updated_at"
+
+[[table]]
+collection = "vaccine_programs"
+table = "VaccinePrograms"
+[table.columns]
+Id = "_id"
+OrganizationId = "organization_id"
+Name = "name"
+VaccinationFrequency = "vaccination_frequency"
+StartDateTime = "start_date_time"
+EndDateTime = "end_date_time"
+ExpectedCoverage = "expected_coverage"
+AssignedVaccineProductIds = "assigned_vaccine_products"
+RegionsCoveredIds = "regions_covered"
+TargetDiseaseId = "target_disease_id"
+MonitoringAndEvaluationMethods = "monitoring_and_evaluation_methods"
+Description = "description"
+Status = "status"
+Coverage = "coverage"
+CreatedAt = "meta.created_at"
+UpdatedAt = "meta.updated_at"
+
+[[table.children]]
+array = "yearly_targets"
+table = "YearlyTarget"
+parent_key = "VaccineProgramId"
+[table.children.columns]
+Year = "year"
+TargetPercentage = "target_percentage"
