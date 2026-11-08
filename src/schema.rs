@@ -11,6 +11,7 @@ pub struct Column {
     /// Postgres udt name: uuid, text, int4, timestamptz, _text (array of text), ...
     pub udt: String,
     pub nullable: bool,
+    /// a default, an identity, or a generated column: the database fills it
     pub has_default: bool,
 }
 
@@ -39,7 +40,8 @@ pub fn read(db: &mut impl GenericClient, schema: &str) -> Result<HashMap<String,
     let mut tables: HashMap<String, Table> = HashMap::new();
 
     for row in db.query(
-        "select table_name::text, column_name::text, udt_name::text, is_nullable = 'YES', column_default is not null
+        "select table_name::text, column_name::text, udt_name::text, is_nullable = 'YES',
+                column_default is not null or is_identity = 'YES' or is_generated = 'ALWAYS'
          from information_schema.columns where table_schema = $1 order by table_name, ordinal_position",
         &[&schema],
     )? {
@@ -93,19 +95,14 @@ pub fn read(db: &mut impl GenericClient, schema: &str) -> Result<HashMap<String,
     Ok(tables)
 }
 
-/// Order `names` so every table comes after the tables it references. References to tables
-/// outside `names` don't constrain the order (they're expected to be loaded already).
-pub fn load_order(names: &[String], tables: &HashMap<String, Table>) -> Result<Vec<String>> {
+/// Order units so each comes after the tables it references. `refs` lists the tables a unit
+/// references; references to anything outside `names` don't constrain the order.
+pub fn load_order(names: &[String], refs: impl Fn(&str) -> Vec<String>) -> Result<Vec<String>> {
     let wanted: BTreeSet<&str> = names.iter().map(String::as_str).collect();
-    let mut deps: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    let mut deps: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
     for name in names {
-        let refs = tables[name]
-            .foreign_keys
-            .iter()
-            .map(|fk| fk.ref_table.as_str())
-            .filter(|r| wanted.contains(r) && *r != name)
-            .collect();
-        deps.insert(name, refs);
+        let r = refs(name).into_iter().filter(|r| wanted.contains(r.as_str()) && r != name).collect();
+        deps.insert(name, r);
     }
 
     let mut order = Vec::new();
@@ -129,26 +126,21 @@ pub fn load_order(names: &[String], tables: &HashMap<String, Table>) -> Result<V
 mod tests {
     use super::*;
 
-    fn table(refs: &[&str]) -> Table {
-        Table {
-            foreign_keys: refs
-                .iter()
-                .map(|r| ForeignKey { column: "x".into(), ref_schema: "s".into(), ref_table: r.to_string(), ref_column: "Id".into() })
-                .collect(),
-            ..Default::default()
-        }
+    fn refs(pairs: &[(&str, &[&str])]) -> impl Fn(&str) -> Vec<String> {
+        let map: HashMap<String, Vec<String>> =
+            pairs.iter().map(|(k, v)| (k.to_string(), v.iter().map(|s| s.to_string()).collect())).collect();
+        move |n| map.get(n).cloned().unwrap_or_default()
     }
 
     #[test]
     fn parents_load_first() {
-        let tables = HashMap::from([
-            ("Species".to_string(), table(&["Organizations"])),
-            ("Organizations".to_string(), table(&["Countries"])),
-            ("Countries".to_string(), table(&[])),
-            ("Users".to_string(), table(&["Users"])), // self-reference is fine
+        let r = refs(&[
+            ("Species", &["Organizations"]),
+            ("Organizations", &["Countries"]),
+            ("Users", &["Users"]), // self-reference is fine
         ]);
         let names: Vec<String> = ["Species", "Users", "Organizations", "Countries"].map(String::from).to_vec();
-        let order = load_order(&names, &tables).unwrap();
+        let order = load_order(&names, r).unwrap();
         let pos = |n: &str| order.iter().position(|o| o == n).unwrap();
         assert!(pos("Countries") < pos("Organizations"));
         assert!(pos("Organizations") < pos("Species"));
@@ -156,7 +148,7 @@ mod tests {
 
     #[test]
     fn cycles_are_reported() {
-        let tables = HashMap::from([("A".to_string(), table(&["B"])), ("B".to_string(), table(&["A"]))]);
-        assert!(load_order(&["A".into(), "B".into()], &tables).is_err());
+        let r = refs(&[("A", &["B"]), ("B", &["A"])]);
+        assert!(load_order(&["A".into(), "B".into()], r).is_err());
     }
 }
