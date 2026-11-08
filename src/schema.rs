@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use anyhow::{Result, bail};
+
 use postgres::GenericClient;
 
 #[derive(Debug, Clone)]
@@ -96,8 +97,9 @@ pub fn read(db: &mut impl GenericClient, schema: &str) -> Result<HashMap<String,
 }
 
 /// Order units so each comes after the tables it references. `refs` lists the tables a unit
-/// references; references to anything outside `names` don't constrain the order.
-pub fn load_order(names: &[String], refs: impl Fn(&str) -> Vec<String>) -> Result<Vec<String>> {
+/// references; references to anything outside `names` don't constrain the order. On a cycle,
+/// the error lists the units that couldn't be ordered.
+pub fn load_order(names: &[String], refs: impl Fn(&str) -> Vec<String>) -> Result<Vec<String>, Vec<String>> {
     let wanted: BTreeSet<&str> = names.iter().map(String::as_str).collect();
     let mut deps: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
     for name in names {
@@ -109,7 +111,7 @@ pub fn load_order(names: &[String], refs: impl Fn(&str) -> Vec<String>) -> Resul
     while !deps.is_empty() {
         let ready: Vec<&str> = deps.iter().filter(|(_, d)| d.is_empty()).map(|(n, _)| *n).collect();
         if ready.is_empty() {
-            bail!("foreign keys form a cycle between: {}", deps.keys().copied().collect::<Vec<_>>().join(", "));
+            return Err(deps.keys().map(|k| k.to_string()).collect());
         }
         for n in ready {
             deps.remove(n);

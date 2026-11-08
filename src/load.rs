@@ -37,8 +37,19 @@ pub struct Report {
     pub docs: usize,
     pub loaded: u64,
     pub rejects: Vec<Reject>,
-    /// column -> how many rows got Go's zero value
+    pub counts: Counts,
+    /// the collection isn't in the dump (mongodump skips empty collections)
+    pub missing: bool,
+    /// rows that loaded, but a deferred reference pointed at nothing and was left NULL
+    pub nulled_refs: Vec<Reject>,
+}
+
+#[derive(Debug, Default)]
+pub struct Counts {
+    /// column -> rows that got Go's zero value because the field was missing
     pub zero_filled: BTreeMap<String, usize>,
+    /// column -> rows where Go's zero ObjectId (unset) went into a nullable column as NULL
+    pub zero_ids: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -63,6 +74,8 @@ struct Plan<'a> {
     columns: Vec<(&'a Column, Fill)>,
     /// go_zero_values: a mapped required field missing on one document gets Go's zero value
     zero_missing: bool,
+    /// nullable foreign-key columns written after every table is loaded, to break FK cycles
+    deferred: BTreeSet<String>,
 }
 
 struct Child<'a> {
@@ -89,42 +102,164 @@ struct Ctx<'a> {
 pub fn run(db: &mut Client, m: &Mapping, opts: &Options) -> Result<Vec<Report>> {
     let ids = Suffix::parse(&m.id_suffix)?;
     let tables = schema::read(db, &m.schema)?;
-    let units = plan(m, &tables)?;
-
-    let names: Vec<String> = units.keys().cloned().collect();
-    let order = schema::load_order(&names, |name| {
-        let u = &units[name];
-        std::iter::once(&u.plan)
-            .chain(u.children.iter().map(|c| &c.plan))
-            .flat_map(|p| p.table.foreign_keys.iter().map(|fk| fk.ref_table.clone()))
-            .collect()
-    })?;
+    let mut units = plan(m, &tables)?;
+    let order = order_units(&mut units)?;
 
     fs::create_dir_all(opts.rejects).with_context(|| format!("create {}", opts.rejects.display()))?;
     let mut tx = db.transaction()?;
-    let mut reports = Vec::new();
-    for name in &order {
+    for sql in &m.before {
+        tx.batch_execute(sql).with_context(|| format!("before: {sql}"))?;
+    }
+
+    let mut reports: Vec<(String, Report)> = Vec::new();
+    for (i, name) in order.iter().enumerate() {
         let unit = &units[name];
-        let mut rejects = Vec::new();
-
-        let r = load_table(&mut tx, &m.schema, unit, &ids, opts).with_context(|| format!("loading {name}"))?;
-        rejects.extend(r.rejects.iter().map(|x| reject_line(&r.table, x)));
-        reports.push(r);
-
+        let r = load_table(&mut tx, &m.schema, unit, i, &ids, opts).with_context(|| format!("loading {name}"))?;
+        reports.push((unit.collection.to_string(), r));
         for child in &unit.children {
             let r = load_children(&mut tx, &m.schema, unit, child, &ids, opts)
                 .with_context(|| format!("loading {} from {}.{}", child.plan.table_name, unit.collection, child.array))?;
-            rejects.extend(r.rejects.iter().map(|x| reject_line(&r.table, x)));
-            reports.push(r);
+            reports.push((unit.collection.to_string(), r));
         }
-        write_rejects(opts.rejects, unit.collection, &rejects)?;
+    }
+
+    // references held back to break cycles, now that every table is in
+    for (i, name) in order.iter().enumerate() {
+        let unit = &units[name];
+        if unit.plan.deferred.is_empty() {
+            continue;
+        }
+        let nulled = fill_deferred(&mut tx, &m.schema, unit, i).with_context(|| format!("deferred refs of {name}"))?;
+        if let Some((_, r)) = reports.iter_mut().find(|(_, r)| r.table == unit.plan.table_name) {
+            r.nulled_refs = nulled;
+        }
+    }
+
+    for sql in &m.after {
+        tx.batch_execute(sql).with_context(|| format!("after: {sql}"))?;
     }
     if opts.commit {
         tx.commit()?;
     } else {
         tx.rollback()?;
     }
-    Ok(reports)
+
+    let mut lines: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    for (collection, r) in &reports {
+        let entry = lines.entry(collection.as_str()).or_default();
+        entry.extend(r.rejects.iter().chain(&r.nulled_refs).map(|x| reject_line(&r.table, x)));
+    }
+    for (collection, l) in &lines {
+        write_rejects(opts.rejects, collection, l)?;
+    }
+    Ok(reports.into_iter().map(|(_, r)| r).collect())
+}
+
+/// Load order from foreign keys between mapped columns. If they form a cycle, order by the
+/// required ones only, and defer each nullable reference that points at a table loaded at the
+/// same point or later: it's written as NULL first and filled in at the end.
+fn order_units(units: &mut BTreeMap<String, Unit>) -> Result<Vec<String>> {
+    let names: Vec<String> = units.keys().cloned().collect();
+    let owner: HashMap<String, String> = units
+        .iter()
+        .flat_map(|(n, u)| {
+            std::iter::once(u.plan.table_name)
+                .chain(u.children.iter().map(|c| c.plan.table_name))
+                .map(move |t| (t.to_string(), n.clone()))
+        })
+        .collect();
+    // `relaxed` units ignore their nullable references to each other
+    let refs = |units: &BTreeMap<String, Unit>, name: &str, relaxed: &BTreeSet<String>| -> Vec<String> {
+        let u = &units[name];
+        std::iter::once(&u.plan)
+            .chain(u.children.iter().map(|c| &c.plan))
+            .flat_map(mapped_fks)
+            .filter_map(|(col, fk)| {
+                let target = owner.get(&fk.ref_table)?;
+                let skip = col.nullable && relaxed.contains(name) && relaxed.contains(target);
+                (!skip).then(|| target.clone())
+            })
+            .collect()
+    };
+
+    // relax only the units actually stuck in a cycle, widening until an order exists
+    let mut relaxed = BTreeSet::new();
+    let order = loop {
+        match schema::load_order(&names, |n| refs(units, n, &relaxed)) {
+            Ok(order) => break order,
+            Err(stuck) => {
+                // the stuck set also holds tables that merely depend on a cycle; peel off any
+                // that no other stuck table references, until only cycle members are left
+                let mut cycle: BTreeSet<String> = stuck.iter().cloned().collect();
+                loop {
+                    let referenced: BTreeSet<String> =
+                        cycle.iter().flat_map(|n| refs(units, n, &relaxed)).filter(|t| cycle.contains(t)).collect();
+                    let leaves: Vec<String> = cycle.iter().filter(|n| !referenced.contains(*n)).cloned().collect();
+                    if leaves.is_empty() {
+                        break;
+                    }
+                    for l in leaves {
+                        cycle.remove(&l);
+                    }
+                }
+                let before = relaxed.len();
+                relaxed.extend(cycle);
+                if relaxed.len() == before {
+                    bail!("foreign keys form a cycle through NOT NULL columns, so no load order works: {}", stuck.join(", "));
+                }
+            }
+        }
+    };
+    let pos: HashMap<&str, usize> = order.iter().enumerate().map(|(i, n)| (n.as_str(), i)).collect();
+
+    for (i, name) in order.iter().enumerate() {
+        let u = units.get_mut(name).expect("unit");
+        let later = |t: &str| owner.get(t).is_some_and(|o| pos[o.as_str()] >= i);
+        let defer: Vec<String> = mapped_fks(&u.plan)
+            .filter(|(col, fk)| col.nullable && fk.ref_table != u.plan.table_name && later(&fk.ref_table))
+            .map(|(col, _)| col.name.clone())
+            .collect();
+        u.plan.deferred.extend(defer);
+        for c in &u.children {
+            if let Some((col, fk)) = mapped_fks(&c.plan).find(|(_, fk)| owner.get(&fk.ref_table).is_some_and(|o| pos[o.as_str()] > i)) {
+                bail!("{}.{} references {}, which loads later; lift can't defer child-table columns", c.plan.table_name, col.name, fk.ref_table);
+            }
+        }
+    }
+    Ok(order)
+}
+
+fn mapped_fks<'p>(p: &'p Plan) -> impl Iterator<Item = (&'p Column, &'p schema::ForeignKey)> {
+    p.table.foreign_keys.iter().filter_map(|fk| p.columns.iter().find(|(c, _)| c.name == fk.column).map(|(c, _)| (*c, fk)))
+}
+
+/// Write deferred references: valid ones are filled in, ones pointing at nothing stay NULL.
+fn fill_deferred(tx: &mut Transaction, schema: &str, u: &Unit, i: usize) -> Result<Vec<Reject>> {
+    let p = &u.plan;
+    let (target, pk) = (target(schema, p), ident(&u.pk));
+    let mut nulled = Vec::new();
+    for (col, fk) in mapped_fks(p).filter(|(c, _)| p.deferred.contains(&c.name)) {
+        let c = ident(&col.name);
+        let exists = format!(
+            "exists (select 1 from {}.{} r where r.{} = d.{c})",
+            ident(&fk.ref_schema),
+            ident(&fk.ref_table),
+            ident(&fk.ref_column)
+        );
+        for r in tx.query(&format!("select d.{pk}::text, d.{c}::text from lift_def_{i} d where d.{c} is not null and not {exists}"), &[])? {
+            let value: String = r.get(1);
+            nulled.push(Reject {
+                id: r.get(0),
+                reason: format!("{} -> {}: {value} doesn't exist, left NULL", col.name, fk.ref_table),
+                document: None,
+            });
+        }
+        tx.execute(
+            &format!("update {target} t set {c} = d.{c} from lift_def_{i} d where t.{pk} = d.{pk} and d.{c} is not null and {exists}"),
+            &[],
+        )?;
+    }
+    Ok(nulled)
 }
 
 /// Check the mapping against the real schema before touching any data.
@@ -210,19 +345,23 @@ fn plan_columns<'a>(
         };
         columns.push((col, fill));
     }
-    Plan { table_name: name, table, columns, zero_missing: go_zero_values }
+    Plan { table_name: name, table, columns, zero_missing: go_zero_values, deferred: BTreeSet::new() }
 }
 
-fn load_table(tx: &mut Transaction, schema: &str, u: &Unit, ids: &Suffix, opts: &Options) -> Result<Report> {
+fn load_table(tx: &mut Transaction, schema: &str, u: &Unit, i: usize, ids: &Suffix, opts: &Options) -> Result<Report> {
     let p = &u.plan;
     let mut report = Report { table: p.table_name.into(), ..Default::default() };
+    let Some(docs) = dump::open(opts.dump, u.collection)? else {
+        report.missing = true;
+        return Ok(report);
+    };
     let mut copy = start_copy(tx, schema, p)?;
-    for doc in dump::open(opts.dump, u.collection)? {
+    for doc in docs {
         let node = Bson::Document(doc?);
         report.docs += 1;
         let ctx = Ctx { node: &node, parent: None, parent_key: None };
         let label = doc_id(&node);
-        match row(&ctx, p, ids, &label, &mut report.zero_filled) {
+        match row(&ctx, p, ids, &label, &mut report.counts) {
             Ok(line) => copy.write_all(line.as_bytes())?,
             Err(reason) => report.rejects.push(Reject { id: label, reason, document: Some(node.into_relaxed_extjson()) }),
         }
@@ -231,12 +370,22 @@ fn load_table(tx: &mut Transaction, schema: &str, u: &Unit, ids: &Suffix, opts: 
 
     drop_orphans(tx, schema, p, &mut report)?;
 
-    // upsert, so running twice changes nothing
-    let cols = col_list(p);
+    // deferred references are kept aside and written once every table is loaded
     let pk = ident(&u.pk);
+    if !p.deferred.is_empty() {
+        let keep: Vec<String> = p.deferred.iter().map(|c| ident(c)).collect();
+        tx.batch_execute(&format!(
+            "create temp table lift_def_{i} on commit drop as select {pk}, {} from lift_tmp",
+            keep.join(", ")
+        ))?;
+    }
+
+    // upsert, so running twice changes nothing
+    let cols = insert_cols(p);
     let updates: Vec<String> = p
         .columns
         .iter()
+        .filter(|(c, _)| !p.deferred.contains(&c.name))
         .map(|(c, _)| ident(&c.name))
         .filter(|c| *c != pk)
         .map(|c| format!("{c} = excluded.{c}"))
@@ -254,8 +403,12 @@ fn load_children(tx: &mut Transaction, schema: &str, u: &Unit, c: &Child, ids: &
     let p = &c.plan;
     let mut report = Report { table: p.table_name.into(), ..Default::default() };
     let mut parent_keys = Vec::new();
+    let Some(docs) = dump::open(opts.dump, u.collection)? else {
+        report.missing = true;
+        return Ok(report);
+    };
     let mut copy = start_copy(tx, schema, p)?;
-    for doc in dump::open(opts.dump, u.collection)? {
+    for doc in docs {
         let doc = doc?;
         // the parent's key, converted the same way as in its own table
         let Some(key) = parent_key(&doc, u, ids) else { continue };
@@ -266,7 +419,7 @@ fn load_children(tx: &mut Transaction, schema: &str, u: &Unit, c: &Child, ids: &
             report.docs += 1;
             let label = format!("{parent_label}.{}[{i}]", c.array);
             let ctx = Ctx { node: item, parent: Some(&doc), parent_key: Some(&key) };
-            match row(&ctx, p, ids, &label, &mut report.zero_filled) {
+            match row(&ctx, p, ids, &label, &mut report.counts) {
                 Ok(line) => copy.write_all(line.as_bytes())?,
                 Err(reason) => {
                     report.rejects.push(Reject { id: label, reason, document: Some(item.clone().into_relaxed_extjson()) })
@@ -279,7 +432,7 @@ fn load_children(tx: &mut Transaction, schema: &str, u: &Unit, c: &Child, ids: &
     drop_orphans(tx, schema, p, &mut report)?;
 
     // replace the children of every parent in the dump, so re-runs don't pile up rows
-    let cols = col_list(p);
+    let cols = insert_cols(p);
     tx.execute(
         &format!("delete from {} where {}::text = any($1)", target(schema, p), ident(c.parent_key)),
         &[&parent_keys],
@@ -303,7 +456,7 @@ fn start_copy<'t>(tx: &'t mut Transaction, schema: &str, p: &Plan) -> Result<pos
 /// id on a required reference, a parent that was itself rejected).
 fn drop_orphans(tx: &mut Transaction, schema: &str, p: &Plan, report: &mut Report) -> Result<()> {
     for fk in &p.table.foreign_keys {
-        if !p.columns.iter().any(|(c, _)| c.name == fk.column) {
+        if !p.columns.iter().any(|(c, _)| c.name == fk.column) || p.deferred.contains(&fk.column) {
             continue;
         }
         let (col, rc) = (ident(&fk.column), ident(&fk.ref_column));
@@ -335,20 +488,30 @@ fn parent_key(doc: &Document, u: &Unit, ids: &Suffix) -> Option<String> {
 }
 
 /// One COPY line, or the reason the value can't be stored.
-fn row(ctx: &Ctx, p: &Plan, ids: &Suffix, label: &str, zero_filled: &mut BTreeMap<String, usize>) -> Result<String, String> {
+fn row(ctx: &Ctx, p: &Plan, ids: &Suffix, label: &str, counts: &mut Counts) -> Result<String, String> {
     let mut fields = Vec::with_capacity(p.columns.len() + 1);
     for (col, fill) in &p.columns {
         let found = match fill {
             Fill::Const(v) => Some(convert::to_pg(v, &col.udt, ids)),
             Fill::Zero(z) => {
-                *zero_filled.entry(col.name.clone()).or_default() += 1;
+                *counts.zero_filled.entry(col.name.clone()).or_default() += 1;
                 Some(Ok(z.to_string()))
             }
             Fill::ParentKey => ctx.parent_key.map(|k| Ok(k.to_string())),
-            Fill::Path(path) => convert::lookup_in(ctx.node, path).map(|v| convert::to_pg(v, &col.udt, ids)),
-            Fill::ParentPath(path) => {
-                ctx.parent.and_then(|d| convert::lookup(d, path)).map(|v| convert::to_pg(v, &col.udt, ids))
-            }
+            Fill::Path(path) => match convert::lookup_in(ctx.node, path) {
+                Some(v) if col.nullable && convert::is_zero_oid(v) => {
+                    *counts.zero_ids.entry(col.name.clone()).or_default() += 1;
+                    None
+                }
+                v => v.map(|v| convert::to_pg(v, &col.udt, ids)),
+            },
+            Fill::ParentPath(path) => match ctx.parent.and_then(|d| convert::lookup(d, path)) {
+                Some(v) if col.nullable && convert::is_zero_oid(v) => {
+                    *counts.zero_ids.entry(col.name.clone()).or_default() += 1;
+                    None
+                }
+                v => v.map(|v| convert::to_pg(v, &col.udt, ids)),
+            },
         };
         let value = match found {
             Some(Ok(v)) => Some(v),
@@ -357,7 +520,7 @@ fn row(ctx: &Ctx, p: &Plan, ids: &Suffix, label: &str, zero_filled: &mut BTreeMa
             // a mapped required field missing on this document: Go would have sent its zero value
             None => match convert::zero(&col.udt) {
                 Some(z) if p.zero_missing && !matches!(fill, Fill::ParentKey) => {
-                    *zero_filled.entry(col.name.clone()).or_default() += 1;
+                    *counts.zero_filled.entry(col.name.clone()).or_default() += 1;
                     Some(z.to_string())
                 }
                 _ => return Err(format!("{} is required but missing", col.name)),
@@ -367,6 +530,11 @@ fn row(ctx: &Ctx, p: &Plan, ids: &Suffix, label: &str, zero_filled: &mut BTreeMa
     }
     fields.push(convert::copy_field(Some(label)));
     Ok(fields.join("\t") + "\n")
+}
+
+/// Columns written by the insert: everything except deferred references.
+fn insert_cols(p: &Plan) -> String {
+    p.columns.iter().filter(|(c, _)| !p.deferred.contains(&c.name)).map(|(c, _)| ident(&c.name)).collect::<Vec<_>>().join(", ")
 }
 
 fn col_list(p: &Plan) -> String {
@@ -421,7 +589,7 @@ mod tests {
     fn plan_for(table: &Table, columns: Vec<(&str, Fill)>) -> Plan<'static> {
         let table: &'static Table = Box::leak(Box::new(Table { columns: table.columns.clone(), ..Default::default() }));
         let columns = columns.into_iter().map(|(n, f)| (table.column(n).unwrap(), f)).collect();
-        Plan { table_name: "T", table, columns, zero_missing: true }
+        Plan { table_name: "T", table, columns, zero_missing: true, deferred: BTreeSet::new() }
     }
 
     #[test]
@@ -446,7 +614,7 @@ mod tests {
         let item = bson!({ "year": 2026 });
         let ctx = Ctx { node: &item, parent: Some(&parent), parent_key: Some("6a3a73d0-68e5-ff12-5878-a53f53484550") };
 
-        let line = row(&ctx, &p, &ids(), "p.yearly_targets[0]", &mut BTreeMap::new()).unwrap();
+        let line = row(&ctx, &p, &ids(), "p.yearly_targets[0]", &mut Counts::default()).unwrap();
         assert_eq!(line, "2026\t6a3a73d0-68e5-ff12-5878-a53f53484550\tCowtribe\tp.yearly_targets[0]\n");
     }
 
@@ -456,7 +624,7 @@ mod tests {
         let p = plan_for(&t, vec![("Tag", Fill::Path("$value".into()))]);
         let item = Bson::String("AN-0001".into());
         let ctx = Ctx { node: &item, parent: None, parent_key: None };
-        assert_eq!(row(&ctx, &p, &ids(), "x", &mut BTreeMap::new()).unwrap(), "AN-0001\tx\n");
+        assert_eq!(row(&ctx, &p, &ids(), "x", &mut Counts::default()).unwrap(), "AN-0001\tx\n");
     }
 
     #[test]
@@ -465,9 +633,9 @@ mod tests {
         let p = plan_for(&t, vec![("Count", Fill::Path("count".into()))]);
         let item = bson!({});
         let ctx = Ctx { node: &item, parent: None, parent_key: None };
-        let mut zero = BTreeMap::new();
-        assert_eq!(row(&ctx, &p, &ids(), "x", &mut zero).unwrap(), "0\tx\n");
-        assert_eq!(zero["Count"], 1);
+        let mut counts = Counts::default();
+        assert_eq!(row(&ctx, &p, &ids(), "x", &mut counts).unwrap(), "0\tx\n");
+        assert_eq!(counts.zero_filled["Count"], 1);
     }
 
     #[test]
@@ -476,7 +644,7 @@ mod tests {
         let p = plan_for(&t, vec![("Year", Fill::Path("year".into()))]);
         let item = bson!({ "year": "soon" });
         let ctx = Ctx { node: &item, parent: None, parent_key: None };
-        let err = row(&ctx, &p, &ids(), "x", &mut BTreeMap::new()).unwrap_err();
+        let err = row(&ctx, &p, &ids(), "x", &mut Counts::default()).unwrap_err();
         assert!(err.starts_with("Year: can't store a string"), "{err}");
     }
 }
@@ -540,6 +708,81 @@ mod db_tests {
             "#
         ))
         .unwrap()
+    }
+
+    #[test]
+    fn fk_cycle_is_broken_by_deferring_the_nullable_side() {
+        let Ok(url) = std::env::var("LIFT_TEST_DATABASE_URL") else {
+            eprintln!("skipped: set LIFT_TEST_DATABASE_URL to run");
+            return;
+        };
+        let mut db = Client::connect(&url, NoTls).unwrap();
+        // Shepherd's shape: a user's zone is optional, a zone's provider (a user) is required
+        db.batch_execute(
+            "drop schema if exists lift_cycle cascade; create schema lift_cycle;
+             create table lift_cycle.\"Users\" (\"Id\" text primary key, \"ZoneId\" uuid);
+             create table lift_cycle.\"Zones\" (\"Id\" uuid primary key,
+               \"ProviderId\" text not null references lift_cycle.\"Users\"(\"Id\"));
+             alter table lift_cycle.\"Users\" add foreign key (\"ZoneId\") references lift_cycle.\"Zones\"(\"Id\");",
+        )
+        .unwrap();
+        let dir = std::env::temp_dir().join(format!("lift-cycle-{}", std::process::id()));
+        let (u1, u2, u3, z1) = (ObjectId::new(), ObjectId::new(), ObjectId::new(), ObjectId::new());
+        let write = |name: &str, docs: &[Document]| {
+            let mut bytes = Vec::new();
+            for d in docs {
+                d.to_writer(&mut bytes).unwrap();
+            }
+            fs::create_dir_all(dir.join("db")).unwrap();
+            fs::write(dir.join("db").join(format!("{name}.bson")), bytes).unwrap();
+        };
+        write(
+            "users",
+            &[
+                doc! { "_id": u1, "zone_id": z1 },
+                doc! { "_id": u2, "zone_id": ObjectId::new() },                 // zone was deleted
+                doc! { "_id": u3, "zone_id": ObjectId::from_bytes([0; 12]) },  // Go's "unset"
+            ],
+        );
+        write("zones", &[doc! { "_id": z1, "provider": u1 }]);
+        let m: Mapping = toml::from_str(
+            r#"
+            schema = "lift_cycle"
+            id_suffix = "53484550"
+            [[table]]
+            collection = "users"
+            table = "Users"
+            [table.columns]
+            Id = "_id"
+            ZoneId = "zone_id"
+            [[table]]
+            collection = "zones"
+            table = "Zones"
+            [table.columns]
+            Id = "_id"
+            ProviderId = "provider"
+            "#,
+        )
+        .unwrap();
+        let rejects = dir.join("rejects");
+        let reports = run(&mut db, &m, &Options { dump: &dir, rejects: &rejects, commit: true }).unwrap();
+
+        let users = reports.iter().find(|r| r.table == "Users").unwrap();
+        assert_eq!(users.loaded, 3, "every user loads; the bad zone ref is nulled, not the row");
+        assert_eq!(users.nulled_refs.len(), 1);
+        assert_eq!(users.counts.zero_ids["ZoneId"], 1);
+        assert_eq!(reports.iter().find(|r| r.table == "Zones").unwrap().loaded, 1);
+
+        let zones: Vec<Option<String>> = db
+            .query("select \"ZoneId\"::text from lift_cycle.\"Users\" order by \"ZoneId\" nulls last", &[])
+            .unwrap()
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        assert_eq!(zones, [Some(crate::ids::Suffix::parse("53484550").unwrap().uuid(&z1)), None, None]);
+
+        db.batch_execute("drop schema lift_cycle cascade").unwrap();
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

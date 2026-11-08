@@ -101,6 +101,11 @@ pub fn to_pg(v: &Bson, udt: &str, ids: &Suffix) -> Result<String, String> {
     }
 }
 
+/// Go's "unset" id. In a nullable column it's stored as NULL, which is what the C# side means.
+pub fn is_zero_oid(v: &Bson) -> bool {
+    matches!(v, Bson::ObjectId(o) if o.bytes() == [0; 12])
+}
+
 /// Go's zero value for a column type, used when go_zero_values is on and the field is missing.
 pub fn zero(udt: &str) -> Option<&'static str> {
     if udt.starts_with('_') {

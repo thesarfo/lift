@@ -15,17 +15,19 @@ pub struct Collection {
 }
 
 /// `dir` may be the database folder (`dump/shepherd`) or the dump root (`dump`) holding one.
-pub fn open(dir: &Path, collection: &str) -> Result<Collection> {
-    let path = find(dir, collection)?;
+/// None when the dump has no such collection: mongodump writes nothing for an empty or
+/// never-created collection, so that's treated as zero documents.
+pub fn open(dir: &Path, collection: &str) -> Result<Option<Collection>> {
+    let Some(path) = find(dir, collection)? else { return Ok(None) };
     let file = File::open(&path).with_context(|| format!("open {}", path.display()))?;
-    Ok(Collection { reader: BufReader::new(file), path })
+    Ok(Some(Collection { reader: BufReader::new(file), path }))
 }
 
-fn find(dir: &Path, collection: &str) -> Result<PathBuf> {
+fn find(dir: &Path, collection: &str) -> Result<Option<PathBuf>> {
     let name = format!("{collection}.bson");
     let direct = dir.join(&name);
     if direct.is_file() {
-        return Ok(direct);
+        return Ok(Some(direct));
     }
     if dir.join(format!("{name}.gz")).is_file() {
         bail!("{collection} is gzipped; run mongodump without --gzip");
@@ -38,8 +40,8 @@ fn find(dir: &Path, collection: &str) -> Result<PathBuf> {
         }
     }
     match hits.len() {
-        1 => Ok(hits.remove(0)),
-        0 => bail!("no {name} under {}", dir.display()),
+        1 => Ok(Some(hits.remove(0))),
+        0 => Ok(None),
         _ => bail!("{name} found in several databases under {}; point --dump at one", dir.display()),
     }
 }

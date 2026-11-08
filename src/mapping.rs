@@ -36,6 +36,13 @@ pub struct Mapping {
     /// (0, false, "", empty array, 0001-01-01). That's what the Go API returned for them anyway.
     #[serde(default)]
     pub go_zero_values: bool,
+    /// SQL run inside the load transaction before any table loads, e.g. clearing seed rows
+    /// that clash with the dump.
+    #[serde(default)]
+    pub before: Vec<String>,
+    /// SQL run after every table loads, before commit, e.g. filling derived columns.
+    #[serde(default)]
+    pub after: Vec<String>,
     #[serde(rename = "table")]
     pub tables: Vec<TableMap>,
 }

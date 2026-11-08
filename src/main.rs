@@ -79,9 +79,10 @@ fn real_main() -> Result<()> {
 }
 
 fn print_reports(reports: &[load::Report], rejects: &std::path::Path) {
-    println!("{:<24}{:>8}{:>8}{:>10}", "table", "docs", "loaded", "rejected");
+    println!("{:<34}{:>8}{:>8}{:>10}", "table", "docs", "loaded", "rejected");
     for r in reports {
-        println!("{:<24}{:>8}{:>8}{:>10}", r.table, r.docs, r.loaded, r.rejects.len());
+        let note = if r.missing { "  (not in dump)" } else { "" };
+        println!("{:<34}{:>8}{:>8}{:>10}{note}", r.table, r.docs, r.loaded, r.rejects.len());
         let mut reasons: BTreeMap<&str, usize> = BTreeMap::new();
         for rej in &r.rejects {
             *reasons.entry(rej.reason.as_str()).or_default() += 1;
@@ -89,11 +90,23 @@ fn print_reports(reports: &[load::Report], rejects: &std::path::Path) {
         for (reason, n) in reasons.iter().take(5) {
             println!("    {n} x {reason}");
         }
-        for (col, n) in &r.zero_filled {
+        if reasons.len() > 5 {
+            println!("    ... {} more reasons", reasons.len() - 5);
+        }
+        for rej in r.nulled_refs.iter().take(3) {
+            println!("    {} -> {}", rej.id, rej.reason);
+        }
+        if r.nulled_refs.len() > 3 {
+            println!("    ... {} more references left NULL", r.nulled_refs.len() - 3);
+        }
+        for (col, n) in &r.counts.zero_ids {
+            println!("    {n} x {col} was Go's zero id, stored NULL");
+        }
+        for (col, n) in &r.counts.zero_filled {
             println!("    {n} x {col} filled with Go's zero value");
         }
     }
-    if reports.iter().any(|r| !r.rejects.is_empty()) {
+    if reports.iter().any(|r| !r.rejects.is_empty() || !r.nulled_refs.is_empty()) {
         println!("\nrejected documents are in {}", rejects.display());
     }
 }

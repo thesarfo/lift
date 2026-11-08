@@ -38,7 +38,7 @@ pub fn run(db: &mut Client, m: &Mapping, dump_dir: &std::path::Path) -> Result<V
         // parent keys, and how many elements each child array has
         let mut keys = Vec::new();
         let mut child_counts = vec![0usize; tm.children.len()];
-        for doc in dump::open(dump_dir, &tm.collection)? {
+        for doc in dump::open(dump_dir, &tm.collection)?.into_iter().flatten() {
             let doc = doc?;
             let Some(Ok(k)) = convert::lookup(&doc, pk_path).map(|v| convert::to_pg(v, udt, &ids)) else { continue };
             keys.push(k);
