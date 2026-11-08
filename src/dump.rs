@@ -14,7 +14,7 @@ pub struct Collection {
     path: PathBuf,
 }
 
-/// `dir` may be the database folder (`dump/shepherd`) or the dump root (`dump`) holding one.
+/// `dir` may be the database folder (`dump/shop`) or the dump root (`dump`) holding one.
 /// None when the dump has no such collection: mongodump writes nothing for an empty or
 /// never-created collection, so that's treated as zero documents.
 pub fn open(dir: &Path, collection: &str) -> Result<Option<Collection>> {

@@ -1,25 +1,24 @@
 //! The mapping file: which collection goes to which table, and where each column comes from.
 //!
 //! ```toml
-//! schema = "shepherd"
-//! id_suffix = "53484550"
-//! go_zero_values = true
+//! schema = "shop"
+//! id_suffix = "6c696674"
 //!
 //! [[table]]
-//! collection = "species"
-//! table = "Species"
+//! collection = "orders"
+//! table = "orders"
 //! [table.columns]
-//! Id = "_id"
-//! Name = "name"
-//! CreatedAt = "meta.created_at"
-//! Archived = { value = false }
+//! id = "_id"
+//! status = "status"
+//! placed_at = "meta.created_at"
+//! source = { value = "mongo" }
 //!
 //! [[table.children]]
-//! array = "yearly_targets"
-//! table = "YearlyTarget"
-//! parent_key = "VaccineProgramId"
+//! array = "items"
+//! table = "order_items"
+//! parent_key = "order_id"
 //! [table.children.columns]
-//! Year = "year"
+//! quantity = "qty"
 //! ```
 
 use std::{collections::BTreeMap, path::Path};
@@ -83,4 +82,17 @@ pub enum Source {
 pub fn load(path: &Path) -> Result<Mapping> {
     let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     toml::from_str(&text).with_context(|| format!("parse {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn example_mapping_parses() {
+        let m: Mapping = toml::from_str(include_str!("../examples/shop.toml")).unwrap();
+        assert_eq!(m.tables.len(), 3);
+        assert_eq!(m.tables[2].children[0].parent_key, "order_id");
+        assert_eq!((m.before.len(), m.after.len()), (1, 1));
+    }
 }

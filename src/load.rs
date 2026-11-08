@@ -583,7 +583,7 @@ mod tests {
     }
 
     fn ids() -> Suffix {
-        Suffix::parse("53484550").unwrap()
+        Suffix::parse("6c696674").unwrap()
     }
 
     fn plan_for(table: &Table, columns: Vec<(&str, Fill)>) -> Plan<'static> {
@@ -610,12 +610,12 @@ mod tests {
                 ("OrgName", Fill::ParentPath("org.name".into())),
             ],
         );
-        let parent = doc! { "org": { "name": "Cowtribe" } };
+        let parent = doc! { "org": { "name": "Acme" } };
         let item = bson!({ "year": 2026 });
-        let ctx = Ctx { node: &item, parent: Some(&parent), parent_key: Some("6a3a73d0-68e5-ff12-5878-a53f53484550") };
+        let ctx = Ctx { node: &item, parent: Some(&parent), parent_key: Some("6a3a73d0-68e5-ff12-5878-a53f6c696674") };
 
         let line = row(&ctx, &p, &ids(), "p.yearly_targets[0]", &mut Counts::default()).unwrap();
-        assert_eq!(line, "2026\t6a3a73d0-68e5-ff12-5878-a53f53484550\tCowtribe\tp.yearly_targets[0]\n");
+        assert_eq!(line, "2026\t6a3a73d0-68e5-ff12-5878-a53f6c696674\tAcme\tp.yearly_targets[0]\n");
     }
 
     #[test]
@@ -690,7 +690,7 @@ mod db_tests {
         toml::from_str(&format!(
             r#"
             schema = "{SCHEMA}"
-            id_suffix = "53484550"
+            id_suffix = "6c696674"
             go_zero_values = false
             [[table]]
             collection = "programs"
@@ -717,7 +717,7 @@ mod db_tests {
             return;
         };
         let mut db = Client::connect(&url, NoTls).unwrap();
-        // Shepherd's shape: a user's zone is optional, a zone's provider (a user) is required
+        // a classic cycle: a user's zone is optional, a zone's owner (a user) is required
         db.batch_execute(
             "drop schema if exists lift_cycle cascade; create schema lift_cycle;
              create table lift_cycle.\"Users\" (\"Id\" text primary key, \"ZoneId\" uuid);
@@ -748,7 +748,7 @@ mod db_tests {
         let m: Mapping = toml::from_str(
             r#"
             schema = "lift_cycle"
-            id_suffix = "53484550"
+            id_suffix = "6c696674"
             [[table]]
             collection = "users"
             table = "Users"
@@ -779,7 +779,7 @@ mod db_tests {
             .iter()
             .map(|r| r.get(0))
             .collect();
-        assert_eq!(zones, [Some(crate::ids::Suffix::parse("53484550").unwrap().uuid(&z1)), None, None]);
+        assert_eq!(zones, [Some(crate::ids::Suffix::parse("6c696674").unwrap().uuid(&z1)), None, None]);
 
         db.batch_execute("drop schema lift_cycle cascade").unwrap();
         let _ = fs::remove_dir_all(&dir);
@@ -796,7 +796,7 @@ mod db_tests {
         dump(
             &dir.join("db"),
             &[
-                doc! { "_id": good, "name": "FMD", "yearly_targets": [
+                doc! { "_id": good, "name": "Spring", "yearly_targets": [
                     { "year": 2025, "target_percentage": 50 },
                     { "year": 2026, "target_percentage": 70 },
                 ]},

@@ -1,6 +1,6 @@
 //! ObjectId -> UUID. The 12 ObjectId bytes, then a fixed 4-byte suffix, so the original id can
-//! always be read back out of the UUID. Shepherd uses the suffix "SHEP" (53484550); the API side
-//! lives in shepherd-api-dotnet `Ids/ObjectIdGuid.cs` and must use the same bytes.
+//! always be read back out of the UUID. An app that needs to accept old ObjectId strings must use
+//! the same suffix as the mapping's `id_suffix`.
 
 use anyhow::{Context, Result, bail};
 use bson::oid::ObjectId;
@@ -49,28 +49,27 @@ impl Suffix {
 mod tests {
     use super::*;
 
-    fn shep() -> Suffix {
-        Suffix::parse("53484550").unwrap()
+    fn suffix() -> Suffix {
+        Suffix::parse("6c696674").unwrap()
     }
 
-    // Same vector as ObjectIdGuidTests.ObjectId_MapsToGuidWithShepSuffix in shepherd-api-dotnet.
     #[test]
-    fn matches_the_api_layout() {
+    fn object_id_then_suffix() {
         let oid = ObjectId::parse_str("507f1f77bcf86cd799439011").unwrap();
-        assert_eq!(shep().uuid(&oid), "507f1f77-bcf8-6cd7-9943-901153484550");
+        assert_eq!(suffix().uuid(&oid), "507f1f77-bcf8-6cd7-9943-90116c696674");
     }
 
     #[test]
     fn zero_object_id_is_nil() {
-        assert_eq!(shep().uuid(&ObjectId::from_bytes([0; 12])), NIL);
+        assert_eq!(suffix().uuid(&ObjectId::from_bytes([0; 12])), NIL);
     }
 
     #[test]
     fn string_ids() {
-        let s = shep();
-        assert_eq!(s.uuid_from_str("507f1f77bcf86cd799439011").unwrap(), "507f1f77-bcf8-6cd7-9943-901153484550");
+        let s = suffix();
+        assert_eq!(s.uuid_from_str("507f1f77bcf86cd799439011").unwrap(), "507f1f77-bcf8-6cd7-9943-90116c696674");
         assert_eq!(s.uuid_from_str("10000000-0000-0000-0000-000000000001").unwrap(), "10000000-0000-0000-0000-000000000001");
-        assert_eq!(s.uuid_from_str("Ghana"), None);
+        assert_eq!(s.uuid_from_str("not-an-id"), None);
     }
 
     #[test]

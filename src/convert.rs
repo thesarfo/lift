@@ -101,7 +101,7 @@ pub fn to_pg(v: &Bson, udt: &str, ids: &Suffix) -> Result<String, String> {
     }
 }
 
-/// Go's "unset" id. In a nullable column it's stored as NULL, which is what the C# side means.
+/// A zero ObjectId, which Go services write to mean "unset". In a nullable column it's stored as NULL.
 pub fn is_zero_oid(v: &Bson) -> bool {
     matches!(v, Bson::ObjectId(o) if o.bytes() == [0; 12])
 }
@@ -170,7 +170,7 @@ mod tests {
     use super::*;
 
     fn ids() -> Suffix {
-        Suffix::parse("53484550").unwrap()
+        Suffix::parse("6c696674").unwrap()
     }
 
     #[test]
@@ -185,8 +185,8 @@ mod tests {
     #[test]
     fn object_ids_into_uuid_and_text() {
         let oid = Bson::ObjectId(ObjectId::parse_str("507f1f77bcf86cd799439011").unwrap());
-        assert_eq!(to_pg(&oid, "uuid", &ids()).unwrap(), "507f1f77-bcf8-6cd7-9943-901153484550");
-        // text columns that reference string user ids keep the hex, like the API now mints
+        assert_eq!(to_pg(&oid, "uuid", &ids()).unwrap(), "507f1f77-bcf8-6cd7-9943-90116c696674");
+        // text columns (string ids) keep the 24-char hex
         assert_eq!(to_pg(&oid, "text", &ids()).unwrap(), "507f1f77bcf86cd799439011");
     }
 
