@@ -31,8 +31,7 @@ impl Suffix {
         let mut b = [0u8; 16];
         b[..12].copy_from_slice(&o);
         b[12..].copy_from_slice(&self.0);
-        let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
-        format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
+        uuid_string(&b)
     }
 
     /// A string id from a document: 24-char hex becomes our UUID, a UUID passes through.
@@ -43,6 +42,20 @@ impl Suffix {
         let plain: String = s.chars().filter(|c| *c != '-').collect();
         (plain.len() == 32 && plain.chars().all(|c| c.is_ascii_hexdigit())).then(|| s.to_lowercase())
     }
+}
+
+/// 16 bytes as a lowercase hyphenated UUID, without per-byte allocations (this runs for every id).
+pub fn uuid_string(b: &[u8; 16]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(36);
+    for (i, byte) in b.iter().enumerate() {
+        if matches!(i, 4 | 6 | 8 | 10) {
+            out.push('-');
+        }
+        out.push(HEX[usize::from(byte >> 4)] as char);
+        out.push(HEX[usize::from(byte & 15)] as char);
+    }
+    out
 }
 
 #[cfg(test)]

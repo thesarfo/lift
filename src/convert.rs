@@ -50,8 +50,7 @@ pub fn to_pg(v: &Bson, udt: &str, ids: &Suffix) -> Result<String, String> {
             Bson::ObjectId(oid) => Ok(ids.uuid(oid)),
             Bson::String(s) => ids.uuid_from_str(s).ok_or_else(|| format!("{s:?} is not an ObjectId or UUID")),
             Bson::Binary(b) if b.subtype == BinarySubtype::Uuid && b.bytes.len() == 16 => {
-                let h: String = b.bytes.iter().map(|x| format!("{x:02x}")).collect();
-                Ok(format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..]))
+                Ok(crate::ids::uuid_string(b.bytes.as_slice().try_into().expect("16 bytes")))
             }
             _ => bad(),
         },
@@ -137,10 +136,21 @@ pub fn from_toml(v: &toml::Value) -> Bson {
 
 /// Escape one field for COPY's text format. None is SQL NULL.
 pub fn copy_field(v: Option<&str>) -> String {
-    match v {
-        None => "\\N".into(),
-        Some(s) => s.replace('\\', "\\\\").replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t"),
+    let Some(s) = v else { return "\\N".into() };
+    if !s.contains(['\\', '\n', '\r', '\t']) {
+        return s.to_string();
     }
+    let mut out = String::with_capacity(s.len() + 8);
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn quote_array_elem(s: &str) -> String {
