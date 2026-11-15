@@ -20,10 +20,17 @@ Or unpack a release tarball and run `./install.sh` inside it. This puts `lift` i
 mongodump --db shop --out dump
 export LIFT_DATABASE_URL="host=localhost user=postgres dbname=shop"
 
-lift check  mapping.toml --dump dump    # load, report, roll back
-lift run    mapping.toml --dump dump    # load for real
-lift verify mapping.toml --dump dump    # every document in its table?
+lift plan   dump --schema shop > mapping.toml   # draft a mapping, then fix what didn't line up
+lift check  mapping.toml --dump dump            # load, report, roll back
+lift run    mapping.toml --dump dump            # load for real
+lift verify mapping.toml --dump dump            # every document in its table?
 ```
+
+`plan` reads the target schema and matches each table to a collection of the same name (case and
+a trailing "s" are ignored), then matches columns to fields it finds in a sample of that
+collection's documents. A table with one foreign key into a matched table, paired with the one
+array-of-documents field on that side, is drafted as a child table. Anything it isn't sure about
+is left as a comment in the output, not a guess — review the draft before using it.
 
 `run` is safe to repeat: rows are upserted on their primary key.
 

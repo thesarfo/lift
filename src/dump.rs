@@ -23,6 +23,46 @@ pub fn open(dir: &Path, collection: &str) -> Result<Option<Collection>> {
     Ok(Some(Collection { reader: BufReader::with_capacity(1 << 20, file), path }))
 }
 
+/// Collection names available under `dir` (the database folder or the dump root holding one).
+pub fn list(dir: &Path) -> Result<Vec<String>> {
+    let direct = bson_stems(dir)?;
+    if !direct.is_empty() {
+        return Ok(sorted(direct));
+    }
+    let mut hits: Vec<(PathBuf, Vec<String>)> = Vec::new();
+    for entry in std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))?.flatten() {
+        if entry.path().is_dir() {
+            let names = bson_stems(&entry.path())?;
+            if !names.is_empty() {
+                hits.push((entry.path(), names));
+            }
+        }
+    }
+    match hits.len() {
+        1 => Ok(sorted(hits.remove(0).1)),
+        0 => Ok(Vec::new()),
+        _ => bail!("collections found under several databases in {}; point DUMP at one", dir.display()),
+    }
+}
+
+fn bson_stems(dir: &Path) -> Result<Vec<String>> {
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("bson")
+            && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+        {
+            names.push(stem.to_string());
+        }
+    }
+    Ok(names)
+}
+
+fn sorted(mut names: Vec<String>) -> Vec<String> {
+    names.sort();
+    names
+}
+
 fn find(dir: &Path, collection: &str) -> Result<Option<PathBuf>> {
     let name = format!("{collection}.bson");
     let direct = dir.join(&name);
@@ -57,5 +97,46 @@ impl Iterator for Collection {
             ),
             Err(e) => Some(Err(e.into())),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("lift-dump-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn lists_collections_in_the_db_folder_directly() {
+        let dir = scratch("direct");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("orders.bson"), b"").unwrap();
+        std::fs::write(dir.join("customers.bson"), b"").unwrap();
+        assert_eq!(list(&dir).unwrap(), ["customers", "orders"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lists_collections_from_the_one_db_folder_under_the_dump_root() {
+        let dir = scratch("root");
+        std::fs::create_dir_all(dir.join("shop")).unwrap();
+        std::fs::write(dir.join("shop").join("orders.bson"), b"").unwrap();
+        assert_eq!(list(&dir).unwrap(), ["orders"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ambiguous_root_with_several_db_folders_is_an_error() {
+        let dir = scratch("ambiguous");
+        std::fs::create_dir_all(dir.join("shop")).unwrap();
+        std::fs::write(dir.join("shop").join("orders.bson"), b"").unwrap();
+        std::fs::create_dir_all(dir.join("other")).unwrap();
+        std::fs::write(dir.join("other").join("orders.bson"), b"").unwrap();
+        assert!(list(&dir).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -3,6 +3,7 @@ mod dump;
 mod ids;
 mod load;
 mod mapping;
+mod plan;
 mod report;
 mod schema;
 mod verify;
@@ -16,23 +17,28 @@ const USAGE: &str = "\
 lift: move a mongodump into a Postgres schema you already designed
 
 usage:
-  lift check  MAPPING --dump DIR    load everything, report, then roll back
-  lift run    MAPPING --dump DIR    load for real (safe to re-run)
-  lift verify MAPPING --dump DIR    is every document in its table?
+  lift plan   DUMP --schema SCHEMA     draft a mapping from the dump and the target schema
+  lift check  MAPPING --dump DIR       load everything, report, then roll back
+  lift run    MAPPING --dump DIR       load for real (safe to re-run)
+  lift verify MAPPING --dump DIR       is every document in its table?
 
 options:
   --db URL        Postgres connection string (or set LIFT_DATABASE_URL)
   --rejects DIR   where rejected documents go (default: lift-rejects)
   --report FILE   verify only: also write an HTML report for sign-off
+  --schema NAME   plan only: the target schema to read
+  -o FILE         plan only: write the draft here instead of stdout
 ";
 
 struct Args {
     cmd: String,
-    mapping: PathBuf,
+    mapping: Option<PathBuf>,
     dump: PathBuf,
     db: String,
     rejects: PathBuf,
     report: Option<PathBuf>,
+    schema: Option<String>,
+    out: Option<PathBuf>,
 }
 
 fn main() {
@@ -50,8 +56,24 @@ fn real_main() -> Result<()> {
     if args.report.is_some() && args.cmd != "verify" {
         bail!("--report only works with verify");
     }
-    let m = mapping::load(&args.mapping)?;
     let mut db = Client::connect(&args.db, NoTls).context("connect to postgres")?;
+
+    if args.cmd == "plan" {
+        let schema_name = args.schema.context("missing --schema NAME")?;
+        let tables = schema::read(&mut db, &schema_name)?;
+        let draft = plan::build(&schema_name, &args.dump, &tables)?;
+        let text = plan::render(&draft);
+        match &args.out {
+            Some(path) => {
+                std::fs::write(path, &text).with_context(|| format!("write {}", path.display()))?;
+                eprintln!("draft mapping written to {}", path.display());
+            }
+            None => print!("{text}"),
+        }
+        return Ok(());
+    }
+
+    let m = mapping::load(args.mapping.as_deref().context("missing MAPPING file")?)?;
 
     match args.cmd.as_str() {
         "check" | "run" => {
@@ -67,7 +89,11 @@ fn real_main() -> Result<()> {
             let checks = verify::run(&mut db, &m, &args.dump)?;
             print_checks(&checks);
             if let Some(path) = &args.report {
-                report::write(path, &checks, &report::Meta { mapping: &args.mapping, dump: &args.dump, db: &args.db })?;
+                report::write(
+                    path,
+                    &checks,
+                    &report::Meta { mapping: args.mapping.as_deref().unwrap(), dump: &args.dump, db: &args.db },
+                )?;
                 println!("\nreport written to {}", path.display());
             }
             let bad: Vec<&str> = checks.iter().filter(|c| !c.ok()).map(|c| c.table.as_str()).collect();
@@ -151,7 +177,7 @@ fn print_checks(checks: &[verify::Check]) {
 fn parse() -> Result<Option<Args>> {
     let mut it = env::args().skip(1);
     let Some(cmd) = it.next() else { return Ok(None) };
-    if !matches!(cmd.as_str(), "check" | "run" | "verify") {
+    if !matches!(cmd.as_str(), "plan" | "check" | "run" | "verify") {
         if matches!(cmd.as_str(), "-h" | "--help" | "help") {
             return Ok(None);
         }
@@ -162,6 +188,8 @@ fn parse() -> Result<Option<Args>> {
     let mut db = env::var("LIFT_DATABASE_URL").ok();
     let mut rejects = PathBuf::from("lift-rejects");
     let mut report = None;
+    let mut schema = None;
+    let mut out = None;
     while let Some(a) = it.next() {
         let mut value = || it.next().with_context(|| format!("{a} needs a value"));
         match a.as_str() {
@@ -169,17 +197,22 @@ fn parse() -> Result<Option<Args>> {
             "--db" => db = Some(value()?),
             "--rejects" => rejects = PathBuf::from(value()?),
             "--report" => report = Some(PathBuf::from(value()?)),
+            "--schema" => schema = Some(value()?),
+            "-o" | "--out" => out = Some(PathBuf::from(value()?)),
             s if s.starts_with('-') => bail!("unknown option {s}"),
+            _ if cmd == "plan" && dump.is_none() => dump = Some(PathBuf::from(&a)),
             _ if mapping.is_none() => mapping = Some(PathBuf::from(&a)),
             _ => bail!("unexpected argument {a:?}"),
         }
     }
     Ok(Some(Args {
         cmd,
-        mapping: mapping.context("missing MAPPING file")?,
-        dump: dump.context("missing --dump DIR")?,
+        mapping,
+        dump: dump.context("missing DUMP (or --dump DIR)")?,
         db: db.context("missing --db URL (or LIFT_DATABASE_URL)")?,
         rejects,
         report,
+        schema,
+        out,
     }))
 }
