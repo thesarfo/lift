@@ -133,16 +133,26 @@ fn match_source(column: &Column, table: &Table, scalars: &BTreeSet<String>) -> O
     match_path(&column.name, scalars)
 }
 
+/// Case and separator don't carry meaning across the two sides: Mongo's `full_name` or
+/// `farmer_address_location.residential_address` is the same name as Postgres's `FullName` or
+/// an EF owned type flattened to `FarmerAddressLocation_ResidentialAddress`.
+fn normalize(s: &str) -> String {
+    s.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_lowercase()).collect()
+}
+
 fn match_path(name: &str, scalars: &BTreeSet<String>) -> Option<String> {
-    if scalars.contains(name) {
-        return Some(name.to_string());
-    }
-    let hits: Vec<&String> = scalars.iter().filter(|p| p.rsplit('.').next() == Some(name)).collect();
+    let target = normalize(name);
+    unique_match(&target, scalars, normalize)
+        .or_else(|| unique_match(&target, scalars, |p| normalize(p.rsplit('.').next().unwrap_or(p))))
+}
+
+fn unique_match(target: &str, scalars: &BTreeSet<String>, key: impl Fn(&str) -> String) -> Option<String> {
+    let hits: Vec<&String> = scalars.iter().filter(|p| key(p) == target).collect();
     (hits.len() == 1).then(|| hits[0].clone())
 }
 
 fn names_match(a: &str, b: &str) -> bool {
-    let (a, b) = (a.to_lowercase(), b.to_lowercase());
+    let (a, b) = (normalize(a), normalize(b));
     a == b || a.strip_suffix('s').unwrap_or(&a) == b.strip_suffix('s').unwrap_or(&b)
 }
 
@@ -274,6 +284,18 @@ mod tests {
         assert_eq!(match_path("name", &scalars), Some("name".to_string()));
         assert_eq!(match_path("created_at", &scalars), Some("meta.created_at".to_string()));
         assert_eq!(match_path("missing", &scalars), None);
+    }
+
+    #[test]
+    fn column_matches_across_case_and_separator_style() {
+        // PascalCase Postgres columns against snake_case Mongo fields, including an EF owned
+        // type flattened as Parent_Child against Mongo's nested parent.child.
+        let scalars = BTreeSet::from(["full_name".to_string(), "farmer_address.residential_address".to_string()]);
+        assert_eq!(match_path("FullName", &scalars), Some("full_name".to_string()));
+        assert_eq!(
+            match_path("FarmerAddress_ResidentialAddress", &scalars),
+            Some("farmer_address.residential_address".to_string())
+        );
     }
 
     #[test]
