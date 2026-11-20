@@ -26,11 +26,7 @@ lift run    mapping.toml --dump dump            # load for real
 lift verify mapping.toml --dump dump            # every document in its table?
 ```
 
-`plan` reads the target schema and matches each table to a collection of the same name (case and
-a trailing "s" are ignored), then matches columns to fields it finds in a sample of that
-collection's documents. A table with one foreign key into a matched table, paired with the one
-array-of-documents field on that side, is drafted as a child table. Anything it isn't sure about
-is left as a comment in the output, not a guess — review the draft before using it.
+`plan` reads the target schema and matches each table to a collection of the same name (case and a trailing "s" are ignored), then matches columns to fields it finds in a sample of that collection's documents. A table with one foreign key into a matched table, paired with the one array-of-documents field on that side, is drafted as a child table. Anything it isn't sure about is left as a comment in the output, not a guess. Review the draft before using it.
 
 `run` is safe to repeat: rows are upserted on their primary key.
 
@@ -70,23 +66,6 @@ quantity = "qty"
 ```
 
 lift fills `parent_key` with the parent's id. Paths are relative to the element; `$value` is the element itself and `$parent.x` reads the parent. On a re-run, each parent's children are replaced rather than added again.
-
-## Notes
-
-- ObjectIds become UUIDs made of the 12 ObjectId bytes plus `id_suffix`, so the original id can always be recovered. A zero ObjectId becomes the nil UUID. In a `text` column an ObjectId is kept as its 24-char hex.
-- A zero ObjectId going into a nullable column is stored as NULL. In a required column it's rejected.
-- `go_zero_values` is for data written by Go services, which leave unset fields out: it fills required columns the document doesn't have with Go's zero value (`0`, `false`, `{}`, `0001-01-01`). The report counts every fill.
-- Documents that can't be stored, or that reference rows that don't exist, go to `lift-rejects/<collection>.jsonl` with the reason.
-- When foreign keys form a cycle (users → teams → users), lift writes the nullable side as NULL first and fills it in once both tables are loaded. A reference that points at nothing stays NULL and is reported.
-- `before` and `after` take SQL to run inside the load transaction, e.g. clearing seed rows that clash with the dump, or filling columns lift can't derive.
-- A collection that isn't in the dump loads as empty. mongodump skips empty collections.
-- Reads `mongodump` output only, never a live Mongo. Dump without `--gzip`.
-
-## Speed
-
-On a laptop, a 353 MB dump (1M orders, 3M line items) takes 86 s to `run` and 103 s to `verify`, using about 12 MB of memory. Time grows linearly, so 5 GB is roughly 20 minutes to load and 25 to verify. Reproduce with [examples/gen_shop.rs](examples/gen_shop.rs); set `LIFT_TRACE=1` to see where the time goes.
-
-For the insert, lift drops a table's foreign keys and adds them back afterwards, which re-checks them in one pass instead of row by row. That needs permission to alter the table; without it lift falls back to the slower per-row checks.
 
 ## Build
 
