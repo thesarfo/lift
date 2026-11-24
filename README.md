@@ -1,8 +1,8 @@
 # lift
 
-I built this to migrate a production MongoDB database into Postgres: load a mongodump into a schema I'd already designed, and check nothing was lost.
+I built this to migrate a production MongoDB database into Postgres: load a mongodump into a schema I'd already designed, then prove nothing was lost in the move.
 
-You write a mapping file from collections to tables. lift reads the target schema from Postgres itself, loads in foreign-key order, and tells you about every document that didn't fit.
+You write a mapping from collections to tables. lift reads the target schema straight from Postgres, loads everything in foreign-key order, and tells you about every document that didn't fit.
 
 ## Install
 
